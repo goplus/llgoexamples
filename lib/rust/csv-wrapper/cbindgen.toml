@@ -1,0 +1,7 @@
+# cbindgen.toml
+language = "C"
+include_guard = "CSV_WRAPPER_H"
+namespace = "csv_wrapper"
+
+[export]
+include = ["read_csv", "free_string"]
