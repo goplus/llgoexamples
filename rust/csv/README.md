@@ -5,8 +5,8 @@
 ### Clone & Build Repository
 
 ```
-git clone https://github.com/luoliwoshang/csv-wrapper
-cd csv-wrapper
+git clone https://github.com/goplus/llgoexamples
+cd lib/rust/csv-wrapper
 cargo build --release
 ```
 
