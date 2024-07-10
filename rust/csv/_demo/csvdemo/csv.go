@@ -2,7 +2,7 @@ package main
 
 import (
 	"github.com/goplus/llgo/c"
-	"github.com/goplus/llgo/rust/csv"
+	"github.com/goplus/llgoexamples/rust/csv"
 )
 
 func main() {
