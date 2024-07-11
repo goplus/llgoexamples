@@ -7,7 +7,7 @@ import (
 )
 
 // llgo:type C
-type IniReader struct {
+type Reader struct {
 	Unused [24]byte
 }
 
@@ -24,21 +24,21 @@ type stdstring struct {
 // llgo:link (*stdstring).init C._ZNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE6__initEPKcm
 func (*stdstring) init(s *c.Char, size c.Int) {}
 
-//go:linkname NewIniReader C._ZN9INIReaderC1EPKcm
-func NewIniReader(fileName *c.Char, size c.Ulong) IniReader
+//go:linkname NewReader C._ZN9INIReaderC1EPKcm
+func NewReader(fileName *c.Char, size c.Ulong) Reader
 
-//go:linkname NewIniReaderFile C._ZN9INIReaderC1ERKNSt3__112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE
-func NewIniReaderFile(fileName *stdstring) IniReader
+//go:linkname NewReaderFile C._ZN9INIReaderC1ERKNSt3__112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE
+func NewReaderFile(fileName *stdstring) Reader
 
-// llgo:link (*IniReader).ParseError C._ZNK9INIReader10ParseErrorEv
-func (*IniReader) ParseError() c.Int { return 0 }
+// llgo:link (*Reader).ParseError C._ZNK9INIReader10ParseErrorEv
+func (*Reader) ParseError() c.Int { return 0 }
 
-// llgo:link (*IniReader).GetInteger C._ZNK9INIReader10GetIntegerERKNSt3__112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES8_l
-func (*IniReader) GetInteger(section *stdstring, name *stdstring, defaultValue c.Long) c.Long {
+// llgo:link (*Reader).GetInteger C._ZNK9INIReader10GetIntegerERKNSt3__112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES8_l
+func (*Reader) GetInteger(section *stdstring, name *stdstring, defaultValue c.Long) c.Long {
 	return 0
 }
 
-// llgo:link (*IniReader).GetBoolean C._ZNK9INIReader10GetBooleanERKNSt3__112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES8_b
-func (*IniReader) GetBoolean(section *stdstring, name *stdstring, defaultValue bool) bool {
+// llgo:link (*Reader).GetBoolean C._ZNK9INIReader10GetBooleanERKNSt3__112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES8_b
+func (*Reader) GetBoolean(section *stdstring, name *stdstring, defaultValue bool) bool {
 	return false
 }

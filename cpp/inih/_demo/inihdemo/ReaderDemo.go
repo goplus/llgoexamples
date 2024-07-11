@@ -31,7 +31,7 @@ import (
 
 func main() {
 	demo1()
-	reader := inih.NewIniReaderFile(inih.Str("config.ini"))
+	reader := inih.NewReaderFile(inih.Str("config.ini"))
 	if reader.ParseError() != 0 {
 		println("Error parsing config file")
 		return
@@ -48,7 +48,7 @@ func demo2() {
 username=admin
 timeout=100
 `
-	reader := inih.NewIniReader(c.Str(buf), c.Ulong(len(buf)))
+	reader := inih.NewReader(c.Str(buf), c.Ulong(len(buf)))
 
 	println(&reader)
 	println(reader.ParseError())
