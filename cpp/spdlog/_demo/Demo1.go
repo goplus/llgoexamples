@@ -23,4 +23,5 @@ func main() {
 	spdlog.PrintDebug(c.Str("This debug message should not be printed"))
 	spdlog.SetLevel(1)
 	spdlog.PrintDebug(c.Str("This debug messagen should be printed"))
+	spdlog.PrintInfoWithInt(c.Str("Support for int :{}"), 100)
 }

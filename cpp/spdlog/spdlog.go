@@ -30,3 +30,6 @@ func Shutdown()
 
 //go:linkname SetLevel C._ZN6spdlog9set_levelENS_5level10level_enumE
 func SetLevel(level c.Int)
+
+//go:linkname PrintInfoWithInt C.PrintInfoWithInt
+func PrintInfoWithInt(msg *c.Char, i c.Int)
