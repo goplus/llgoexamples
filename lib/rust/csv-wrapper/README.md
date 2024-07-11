@@ -34,7 +34,14 @@ This step will create a header file named csv_wrapper.h based on the Rust code a
 Install the dylib-installer tool, which is used to install dynamic libraries:
 
 ```bash
-cargo install --git https://github.com/hackerchai/dylib-installer
+brew tap hackerchai/tap
+brew install dylib-installer
+```
+
+Or you can install it using Cargo:
+
+```bash 
+cargo install dylib_installer
 ```
 
 ### Install Dynamic Library
