@@ -2,9 +2,13 @@ package main
 
 import (
 	"github.com/goplus/llgo/c"
+	"github.com/goplus/llgoexamples/c/fcntl"
+	"github.com/goplus/llgoexamples/c/fddef"
+	"github.com/goplus/llgoexamples/c/netdb"
+	"github.com/goplus/llgoexamples/c/os"
+	_select "github.com/goplus/llgoexamples/c/select"
+	"github.com/goplus/llgoexamples/c/socket"
 	"github.com/goplus/llgoexamples/rust/hyper"
-	"net"
-	"syscall"
 	"unsafe"
 )
 
@@ -23,17 +27,19 @@ const (
 
 func ReadCb(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen uintptr) uintptr {
 	conn := (*ConnData)(userdata)
-	// TODO
-	ret, _, errno := syscall.Syscall(syscall.SYS_READ, uintptr(conn.Fd), uintptr(c.Pointer(buf)), bufLen)
 
-	if int(ret) >= 0 {
+	// TODO 这里c-demo中的read是unistd.read，返回的是c.Long
+	ret := os.Read(conn.Fd, c.Pointer(buf), bufLen)
+
+	if ret >= 0 {
 		return uintptr(ret)
 	}
 
-	if errno != syscall.EAGAIN {
-		// kaboom
-		return hyper.IoError
-	}
+	// TODO 无法拿到C中的全局 errno
+	//if errno != syscall.EAGAIN {
+	//	// kaboom
+	//	return hyper.IoError
+	//}
 
 	// would block, register interest
 	if conn.ReadWaker != nil {
@@ -46,16 +52,17 @@ func ReadCb(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen uintptr) 
 func WriteCb(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen uintptr) uintptr {
 	conn := (*ConnData)(userdata)
 	// TODO
-	ret, _, errno := syscall.Syscall(syscall.SYS_WRITE, uintptr(conn.Fd), uintptr(c.Pointer(buf)), bufLen)
+	ret := os.Write(conn.Fd, c.Pointer(buf), bufLen)
 
 	if int(ret) >= 0 {
 		return uintptr(ret)
 	}
 
-	if errno != syscall.EAGAIN {
-		// kaboom
-		return hyper.IoError
-	}
+	// TODO 无法拿到C中的全局 errno
+	//if errno != syscall.EAGAIN {
+	//	// kaboom
+	//	return hyper.IoError
+	//}
 
 	// would block, register interest
 	if conn.WriteWaker != nil {
@@ -78,25 +85,37 @@ func FreeConnData(conn *ConnData) {
 
 func ConnectTo(host *c.Char, port *c.Char) c.Int {
 	// TODO
-	addr := net.JoinHostPort(c.GoString(host), c.GoString(port))
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
+	var hints netdb.AddrInfo
+	c.Memset(c.Pointer(&hints), 0, unsafe.Sizeof(netdb.AddrInfo{}))
+	hints.AiFamily = socket.AF_UNSPEC
+	hints.AiSockType = socket.SOCK_STREAM
+
+	var result, rp *netdb.AddrInfo
+	if netdb.GetAddrInfo(host, port, &hints, &result) != 0 {
+		c.Printf(c.Str("dns failed for %s\n"), host)
+		return -1
+	}
+
+	var sfd c.Int
+	for rp = result; rp != nil; rp = rp.AiNext {
+		sfd = socket.Socket(rp.AiFamily, rp.AiSockType, rp.AiSockType)
+		if sfd == -1 {
+			continue
+		}
+		if socket.Connect(sfd, rp.AiAddr, rp.AiAddrLen) != -1 {
+			break
+		}
+		os.Close(sfd)
+	}
+
+	netdb.FreeAddrInfo(result)
+
+	// no address succeeded
+	if rp == nil {
 		c.Printf(c.Str("connect failed for %s\n"), host)
 		return -1
 	}
-
-	// TODO
-	// 获取文件描述符
-	tcpConn := conn.(*net.TCPConn)
-	file, err := tcpConn.File()
-	if err != nil {
-		c.Printf(c.Str("failed to get file descriptor for %s\n"), host)
-		//tcpConn.Close()
-		//conn.Close()
-		return -1
-	}
-
-	return c.Int(file.Fd())
+	return sfd
 }
 
 func PrintEachHeader(userdata c.Pointer, name *uint8, nameLen uintptr, value *uint8, valueLen uintptr) c.Int {
@@ -109,7 +128,7 @@ func PrintEachChunk(userdata c.Pointer, chunk *hyper.Buf) c.Int {
 	len := chunk.Len()
 
 	// TODO
-	_, _, _ = syscall.Syscall(syscall.SYS_WRITE, uintptr(1), uintptr(c.Pointer(buf)), len)
+	os.Read(1, c.Pointer(buf), len)
 
 	return hyper.IterContinue
 }
@@ -141,14 +160,18 @@ func main() {
 	}
 
 	c.Printf(c.Str("connected to %s, now get %s\n"), host, path)
-
-	// TODO
-	if ret, _, _ := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_SETFL, syscall.O_NONBLOCK); ret != 0 {
+	if fcntl.FcNtl(fd, fcntl.F_SETFL, fcntl.O_NONBLOCK) != 0 {
 		c.Printf(c.Str("failed to set socket to non-blocking\n"))
 		return
 	}
 
-	conn := &ConnData{Fd: c.Int(fd), ReadWaker: nil, WriteWaker: nil}
+	var fdsRead, fdsWrite, fdsExcep fddef.FdSet
+
+	//conn := &ConnData{Fd: c.Int(fd), ReadWaker: nil, WriteWaker: nil}
+	conn := (*ConnData)(c.Malloc(unsafe.Sizeof(ConnData{})))
+	conn.Fd = fd
+	conn.ReadWaker = nil
+	conn.WriteWaker = nil
 
 	// Hookup the IO
 	io := hyper.NewIo()
@@ -288,88 +311,32 @@ func main() {
 
 		// All futures are pending on IO work, so select on the fds.
 
-		var fdsRead, fdsWrite, fdsExcep syscall.FdSet
-
-		FdZero(&fdsRead)
-		FdZero(&fdsWrite)
-		FdZero(&fdsExcep)
+		fddef.FdZero(&fdsRead)
+		fddef.FdZero(&fdsWrite)
+		fddef.FdZero(&fdsExcep)
 
 		// TODO
 		if conn.ReadWaker != nil {
-			FdSet(conn.Fd, &fdsRead)
+			fddef.DarwinFdSet(conn.Fd, &fdsRead)
 		}
 		if conn.WriteWaker != nil {
-			FdSet(conn.Fd, &fdsWrite)
+			fddef.DarwinFdSet(conn.Fd, &fdsWrite)
 		}
 
-		err2 := syscall.Select(int(conn.Fd+1), &fdsRead, &fdsWrite, &fdsExcep, nil)
+		err2 := _select.Select(int(conn.Fd+1), &fdsRead, &fdsWrite, &fdsExcep, nil)
 		if err2 != nil {
 			c.Printf(c.Str("select() error"))
 			return
 		}
 
-		if FdIsSet(conn.Fd, &fdsRead) != 0 {
+		if fddef.DarwinFdIsSet(conn.Fd, &fdsRead) != 0 {
 			conn.ReadWaker.Wake()
 			conn.ReadWaker = nil
 		}
 
-		if FdIsSet(conn.Fd, &fdsWrite) != 0 {
+		if fddef.DarwinFdIsSet(conn.Fd, &fdsWrite) != 0 {
 			conn.WriteWaker.Wake()
 			conn.WriteWaker = nil
 		}
-	}
-}
-
-// TODO Related functions in _fd_set.h
-
-const DarwinNfdbits = c.Ulong(unsafe.Sizeof(int(0)) * 8)
-
-/*
-__header_always_inline int
-__darwin_check_fd_set(int _a, const void *_b)
-{
-#ifdef __clang__
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunguarded-availability-new"
-#endif
-if ((uintptr_t)&__darwin_check_fd_set_overflow != (uintptr_t) 0) {
-#if defined(_DARWIN_UNLIMITED_SELECT) || defined(_DARWIN_C_SOURCE)
-return __darwin_check_fd_set_overflow(_a, _b, 1);
-#else
-return __darwin_check_fd_set_overflow(_a, _b, 0);
-#endif
-} else {
-return 1;
-}
-#ifdef __clang__
-#pragma clang diagnostic pop
-#endif
-}
-*/
-
-func DarwinCheckFdSet() c.Int {
-	// Temporarily returns 1
-	return 1
-}
-
-// FdSet sets the bit for the fd in the set.
-func FdSet(fd c.Int, set *syscall.FdSet) {
-	if DarwinCheckFdSet() != 0 {
-		set.Bits[c.Ulong(fd)/DarwinNfdbits] |= ((int32)((c.Ulong(1)) << (c.Ulong(fd) % DarwinNfdbits)))
-	}
-}
-
-// FdIsSet returns whether the bit for the fd is set in the set.
-func FdIsSet(fd c.Int, set *syscall.FdSet) c.Int {
-	if DarwinCheckFdSet() != 0 {
-		return c.Int(set.Bits[c.Ulong(fd)/DarwinNfdbits] & ((int32)((c.Ulong(1)) << (c.Ulong(fd) % DarwinNfdbits))))
-	}
-	return 0
-}
-
-// FdZero clears the set.
-func FdZero(set *syscall.FdSet) {
-	for i := range set.Bits {
-		set.Bits[i] = 0
 	}
 }
