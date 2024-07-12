@@ -86,12 +86,12 @@ func (db *DB) Close() {}
 // llgo:link (*DB).Set C.sled_set
 func (db *DB) Set(key *byte, keyLen uintptr, val *byte, valLen uintptr) {}
 
-// SetBytes sets a key to a value
+// SetBytes sets a key to a value.
 func (db *DB) SetBytes(key, val []byte) {
 	db.Set(unsafe.SliceData(key), uintptr(len(key)), unsafe.SliceData(val), uintptr(len(val)))
 }
 
-// SetString sets a key to a value
+// SetString sets a key to a value.
 func (db *DB) SetString(key, val string) {
 	db.Set(unsafe.StringData(key), uintptr(len(key)), unsafe.StringData(val), uintptr(len(val)))
 }
@@ -135,7 +135,8 @@ func (db *DB) DelString(key string) {
 // llgo:link (*DB).CAS C.sled_compare_and_swap
 func (db *DB) CAS(
 	key *byte, keyLen uintptr, oldVal *byte, oldValLen uintptr,
-	newVal *byte, newValLen uintptr, actualVal **byte, actualValLen *uintptr) bool {
+	newVal *byte, newValLen uintptr, actualVal **byte, actualValLen *uintptr,
+) bool {
 	return false
 }
 
