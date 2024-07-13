@@ -15,7 +15,14 @@ cargo build --release
 Install the dylib-installer tool, which is used to install dynamic libraries:
 
 ```bash
-cargo install --git https://github.com/hackerchai/dylib-installer
+brew tap hackerchai/tap
+brew install dylib-installer
+```
+
+Or you can install it using Cargo:
+
+```bash 
+cargo install dylib_installer
 ```
 
 ### Install Dynamic Library
