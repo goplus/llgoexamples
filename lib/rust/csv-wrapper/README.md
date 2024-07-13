@@ -9,10 +9,9 @@ First, clone this repository to your local machine:
 ```
 git clone https://github.com/goplus/llgoexamples
 cd lib/rust/csv-wrapper
-cargo build --release
 ```
 
-Build the Project
+### Build the Project
 Build the project using Cargo to generate the dynamic library:
 
 ```
@@ -24,7 +23,7 @@ cargo build --release
 Generate the C language header file using cbindgen:
 
 ```bash
-cbindgen --config cbindgen.toml --crate csv_wrapper --output csv_wrapper.h
+cbindgen --config cbindgen.toml --crate csv_wrapper --output include/csv_wrapper.h
 ```
 
 This step will create a header file named csv_wrapper.h based on the Rust code and the configuration specified in cbindgen.toml.
@@ -46,8 +45,8 @@ cargo install dylib_installer
 
 ### Install Dynamic Library
 
-Use dylib-installer to install the built dynamic library into the system directory:
+Use dylib-installer to install the built dynamic library and header file into the system directory:
 
 ```
-sudo dylib_installer -d ./target/release/
+sudo dylib_installer ./target/release/ ./include
 ```
