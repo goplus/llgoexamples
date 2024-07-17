@@ -93,11 +93,11 @@ type ResultRead struct {
 }
 
 type BlockingLister struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
 type BlockingOperator struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
 type Operator struct {
@@ -105,23 +105,23 @@ type Operator struct {
 }
 
 type InnerEntry struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
 type HashMapStringString struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
 type InnerMetadata struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
 type OperatorInfo struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
 type StdReader struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
 type Entry struct {
