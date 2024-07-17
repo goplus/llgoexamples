@@ -47,67 +47,73 @@ const (
 )
 
 type Body struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
 type Buf struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
 type ClientConn struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
 type ClientConnOptions struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
 type Context struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
 type Error struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
 type Executor struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
 type Headers struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
 type Io struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
 type Request struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
 type Response struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
 type Task struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
 type Waker struct {
-	Unused [8]byte
+	Unused [0]byte
 }
 
+// llgo:type C
 type BodyForeachCallback func(c.Pointer, *Buf) c.Int
 
+// llgo:type C
 type BodyDataCallback func(c.Pointer, *Context, **Buf) c.Int
 
+// llgo:type C
 type RequestOnInformationalCallback func(c.Pointer, *Response)
 
+// llgo:type C
 type HeadersForeachCallback func(c.Pointer, *uint8, uintptr, *uint8, uintptr) c.Int
 
+// llgo:type C
 type IoReadCallback func(c.Pointer, *Context, *uint8, uintptr) uintptr
 
+// llgo:type C
 type IoWriteCallback func(c.Pointer, *Context, *uint8, uintptr) uintptr
 
 // Returns a static ASCII (null terminated) string of the hyper_client version.
