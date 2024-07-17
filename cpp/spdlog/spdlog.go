@@ -7,7 +7,8 @@ import (
 )
 
 const (
-	LLGoPackage = "link: $(pkg-config --libs cppWrap spdlog); -lcppWrap -lspdlog -pthread -lfmt"
+	LLGoFiles   = "$(pkg-config --cflags spdlog): _wrap/spdlog.cpp"
+	LLGoPackage = "link: $(pkg-config --libs spdlog); -lspdlog -pthread -lfmt -lc++"
 )
 
 //go:linkname PrintInfo C.PrintInfo
