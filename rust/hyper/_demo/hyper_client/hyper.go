@@ -2,11 +2,10 @@ package main
 
 import (
 	"github.com/goplus/llgo/c"
-	"github.com/goplus/llgo/c/fddef"
-	"github.com/goplus/llgo/c/netdb"
+	"github.com/goplus/llgo/c/net"
 	"github.com/goplus/llgo/c/os"
-	_select "github.com/goplus/llgo/c/select"
-	"github.com/goplus/llgo/c/socket"
+	"github.com/goplus/llgo/c/sys"
+	"github.com/goplus/llgo/c/syscall"
 	"github.com/goplus/llgoexamples/rust/hyper"
 )
 
@@ -83,30 +82,30 @@ func FreeConnData(conn *ConnData) {
 }
 
 func ConnectTo(host *c.Char, port *c.Char) c.Int {
-	var hints netdb.AddrInfo
-	//c.Memset(c.Pointer(&hints), 0, unsafe.Sizeof(netdb.AddrInfo{}))
-	hints.AiFamily = socket.AF_UNSPEC
-	hints.AiSockType = socket.SOCK_STREAM
+	var hints net.AddrInfo
+	//c.Memset(c.Pointer(&hints), 0, unsafe.Sizeof(net.AddrInfo{}))
+	hints.AiFamily = net.AF_UNSPEC
+	hints.AiSockType = net.SOCK_STREAM
 
-	var result, rp *netdb.AddrInfo
-	if netdb.Getaddrinfo(host, port, &hints, &result) != 0 {
+	var result, rp *net.AddrInfo
+	if net.Getaddrinfo(host, port, &hints, &result) != 0 {
 		c.Printf(c.Str("dns failed for %s\n"), host)
 		return -1
 	}
 
 	var sfd c.Int
 	for rp = result; rp != nil; rp = rp.AiNext {
-		sfd = socket.Socket(rp.AiFamily, rp.AiSockType, rp.AiProtocol)
+		sfd = net.Socket(rp.AiFamily, rp.AiSockType, rp.AiProtocol)
 		if sfd == -1 {
 			continue
 		}
-		if socket.Connect(sfd, rp.AiAddr, rp.AiAddrLen) != -1 {
+		if net.Connect(sfd, rp.AiAddr, rp.AiAddrLen) != -1 {
 			break
 		}
 		os.Close(sfd)
 	}
 
-	netdb.Freeaddrinfo(result)
+	net.Freeaddrinfo(result)
 
 	// no address succeeded
 	if rp == nil {
@@ -165,11 +164,11 @@ func main() {
 	c.Printf(c.Str("connected to %s, now get %s\n"), c.Str(host), c.Str(path))
 
 	if os.Fcntl(fd, os.F_SETFL, os.O_NONBLOCK) != 0 {
-		c.Printf(c.Str("failed to set socket to non-blocking\n"))
+		c.Printf(c.Str("failed to set net to non-blocking\n"))
 		return
 	}
 
-	var fdsRead, fdsWrite, fdsExcep fddef.FdSet
+	var fdsRead, fdsWrite, fdsExcep syscall.FdSet
 
 	conn := &ConnData{Fd: fd, ReadWaker: nil, WriteWaker: nil}
 
@@ -328,21 +327,21 @@ func main() {
 
 		// All futures are pending on IO work, so select on the fds.
 
-		fddef.FdZero(&fdsRead)
-		fddef.FdZero(&fdsWrite)
-		fddef.FdZero(&fdsExcep)
+		sys.FD_ZERO(&fdsRead)
+		sys.FD_ZERO(&fdsWrite)
+		sys.FD_ZERO(&fdsExcep)
 
 		if conn.ReadWaker != nil {
-			fddef.Fdset(conn.Fd, &fdsRead)
+			sys.FD_SET(conn.Fd, &fdsRead)
 		}
 		if conn.WriteWaker != nil {
-			fddef.Fdset(conn.Fd, &fdsWrite)
+			sys.FD_SET(conn.Fd, &fdsWrite)
 		}
 
-		var tv _select.TimeVal
+		var tv sys.TimeVal
 		tv.TvSec = 10
 
-		selRet := _select.Select(conn.Fd+1, &fdsRead, &fdsWrite, &fdsExcep, &tv)
+		selRet := sys.Select(conn.Fd+1, &fdsRead, &fdsWrite, &fdsExcep, &tv)
 		if selRet < 0 {
 			c.Printf(c.Str("select() error\n"))
 			return
@@ -351,12 +350,12 @@ func main() {
 			return
 		}
 
-		if fddef.FdIsset(conn.Fd, &fdsRead) != 0 {
+		if sys.FD_ISSET(conn.Fd, &fdsRead) != 0 {
 			conn.ReadWaker.Wake()
 			conn.ReadWaker = nil
 		}
 
-		if fddef.FdIsset(conn.Fd, &fdsWrite) != 0 {
+		if sys.FD_ISSET(conn.Fd, &fdsWrite) != 0 {
 			conn.WriteWaker.Wake()
 			conn.WriteWaker = nil
 		}

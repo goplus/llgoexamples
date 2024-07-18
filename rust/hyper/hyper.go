@@ -128,8 +128,7 @@ func NewBody() *Body {
 
 // Free a body.
 // llgo:link (*Body).Free C.hyper_body_free
-func (body *Body) Free() {
-}
+func (body *Body) Free() {}
 
 // Creates a task that will poll a response body for the next buffer of data.
 // llgo:link (*Body).Data C.hyper_body_data
@@ -145,13 +144,11 @@ func (body *Body) Foreach(callback BodyForeachCallback, userdata c.Pointer) *Tas
 
 // Set userdata on this body, which will be passed to callback functions.
 // llgo:link (*Body).SetUserdata C.hyper_body_set_userdata
-func (body *Body) SetUserdata(userdata c.Pointer) {
-}
+func (body *Body) SetUserdata(userdata c.Pointer) {}
 
 // Set the outgoing data callback for this body.
 // llgo:link (*Body).SetDataFunc C.hyper_body_set_data_func
-func (body *Body) SetDataFunc(callback BodyDataCallback) {
-}
+func (body *Body) SetDataFunc(callback BodyDataCallback) {}
 
 // Create a new `hyper_buf *` by copying the provided bytes.
 // llgo:link CopyBuf C.hyper_buf_copy
@@ -173,8 +170,7 @@ func (buf *Buf) Len() uintptr {
 
 // Free this buffer.
 // llgo:link (*Buf).Free C.hyper_buf_free
-func (buf *Buf) Free() {
-}
+func (buf *Buf) Free() {}
 
 // Creates an HTTP client handshake task.
 // llgo:link Handshake C.hyper_clientconn_handshake
@@ -190,8 +186,7 @@ func (conn *ClientConn) Send(req *Request) *Task {
 
 // Free a `hyper_clientconn *`.
 // llgo:link (*ClientConn).Free C.hyper_clientconn_free
-func (conn *ClientConn) Free() {
-}
+func (conn *ClientConn) Free() {}
 
 // Creates a new set of HTTP clientconn options to be used in a handshake.
 // llgo:link NewClientConnOptions C.hyper_clientconn_options_new
@@ -201,23 +196,19 @@ func NewClientConnOptions() *ClientConnOptions {
 
 // Set whether header case is preserved.
 // llgo:link (*ClientConnOptions).SetPreserveHeaderCase C.hyper_clientconn_options_set_preserve_header_case
-func (opts *ClientConnOptions) SetPreserveHeaderCase(enabled c.Int) {
-}
+func (opts *ClientConnOptions) SetPreserveHeaderCase(enabled c.Int) {}
 
 // Set whether header order is preserved.
 // llgo:link (*ClientConnOptions).SetPreserveHeaderOrder C.hyper_clientconn_options_set_preserve_header_order
-func (opts *ClientConnOptions) SetPreserveHeaderOrder(enabled c.Int) {
-}
+func (opts *ClientConnOptions) SetPreserveHeaderOrder(enabled c.Int) {}
 
 // Free a set of HTTP clientconn options.
 // llgo:link (*ClientConnOptions).Free C.hyper_clientconn_options_free
-func (opts *ClientConnOptions) Free() {
-}
+func (opts *ClientConnOptions) Free() {}
 
 // Set the client background task executor.
 // llgo:link (*ClientConnOptions).Exec C.hyper_clientconn_options_exec
-func (opts *ClientConnOptions) Exec(exec *Executor) {
-}
+func (opts *ClientConnOptions) Exec(exec *Executor) {}
 
 // Set whether to use HTTP2.
 // llgo:link (*ClientConnOptions).HTTP2 C.hyper_clientconn_options_http2
@@ -256,8 +247,7 @@ func NewRequest() *Request {
 
 // Free an HTTP request.
 // llgo:link (*Request).Free C.hyper_request_free
-func (req *Request) Free() {
-}
+func (req *Request) Free() {}
 
 // Set the HTTP Method of the request.
 // llgo:link (*Request).SetMethod C.hyper_request_set_method
@@ -303,8 +293,7 @@ func (req *Request) OnInformational(callback RequestOnInformationalCallback, dat
 
 // Free an HTTP response.
 // llgo:link (*Response).Free C.hyper_response_free
-func (resp *Response) Free() {
-}
+func (resp *Response) Free() {}
 
 // Get the HTTP-Status code of this response.
 // llgo:link (*Response).Status C.hyper_response_status
@@ -344,8 +333,7 @@ func (resp *Response) Body() *Body {
 
 // Iterates the headers passing each name and value pair to the callback.
 // llgo:link (*Headers).Foreach C.hyper_headers_foreach
-func (headers *Headers) Foreach(callback HeadersForeachCallback, userdata c.Pointer) {
-}
+func (headers *Headers) Foreach(callback HeadersForeachCallback, userdata c.Pointer) {}
 
 // Sets the header with the provided name to the provided value.
 // llgo:link (*Headers).Set C.hyper_headers_set
@@ -367,23 +355,19 @@ func NewIo() *Io {
 
 // Free an IO handle.
 // llgo:link (*Io).Free C.hyper_io_free
-func (io *Io) Free() {
-}
+func (io *Io) Free() {}
 
 // Set the user data pointer for this IO to some value.
 // llgo:link (*Io).SetUserdata C.hyper_io_set_userdata
-func (io *Io) SetUserdata(data c.Pointer) {
-}
+func (io *Io) SetUserdata(data c.Pointer) {}
 
 // Set the read function for this IO transport.
 // llgo:link (*Io).SetRead C.hyper_io_set_read
-func (io *Io) SetRead(callback IoReadCallback) {
-}
+func (io *Io) SetRead(callback IoReadCallback) {}
 
 // Set the write function for this IO transport.
 // llgo:link (*Io).SetWrite C.hyper_io_set_write
-func (io *Io) SetWrite(callback IoWriteCallback) {
-}
+func (io *Io) SetWrite(callback IoWriteCallback) {}
 
 // Creates a new task executor.
 // llgo:link NewExecutor C.hyper_executor_new
@@ -393,8 +377,7 @@ func NewExecutor() *Executor {
 
 // Frees an executor and any incomplete tasks still part of it.
 // llgo:link (*Executor).Free C.hyper_executor_free
-func (exec *Executor) Free() {
-}
+func (exec *Executor) Free() {}
 
 // Push a task onto the executor.
 // llgo:link (*Executor).Push C.hyper_executor_push
@@ -410,8 +393,7 @@ func (exec *Executor) Poll() *Task {
 
 // Free a task.
 // llgo:link (*Task).Free C.hyper_task_free
-func (task *Task) Free() {
-}
+func (task *Task) Free() {}
 
 // Takes the output value of this task.
 // llgo:link (*Task).Value C.hyper_task_value
@@ -427,8 +409,7 @@ func (task *Task) Type() TaskReturnType {
 
 // Set a user data pointer to be associated with this task.
 // llgo:link (*Task).SetUserdata C.hyper_task_set_userdata
-func (task *Task) SetUserdata(userdata c.Pointer) {
-}
+func (task *Task) SetUserdata(userdata c.Pointer) {}
 
 // Retrieve the userdata that has been set via `hyper_task_set_userdata`.
 // llgo:link (*Task).Userdata C.hyper_task_userdata
@@ -444,10 +425,8 @@ func (cx *Context) Waker() *Waker {
 
 // Free a waker.
 // llgo:link (*Waker).Free C.hyper_waker_free
-func (waker *Waker) Free() {
-}
+func (waker *Waker) Free() {}
 
 // Wake up the task associated with a waker.
 // llgo:link (*Waker).Wake C.hyper_waker_wake
-func (waker *Waker) Wake() {
-}
+func (waker *Waker) Wake() {}
