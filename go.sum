@@ -6,3 +6,5 @@ github.com/goplus/llgo v0.9.1-0.20240712060421-858d38d314a3 h1:2fZ2zQ8S58KvOsJTx
 github.com/goplus/llgo v0.9.1-0.20240712060421-858d38d314a3/go.mod h1:zsrtWZapL4aklZc99xBSZRynGzLTIT1mLRjP0VSn9iw=
 github.com/goplus/llgo v0.9.3-0.20240726020431-98d075728f2b h1:z9FUoeAALL5ytBhhGhE1dXm4+L1Q2eMUTcfiqLAZgf8=
 github.com/goplus/llgo v0.9.3-0.20240726020431-98d075728f2b/go.mod h1:zsrtWZapL4aklZc99xBSZRynGzLTIT1mLRjP0VSn9iw=
+github.com/goplus/llgo v0.9.4-0.20240729010130-b3b4f55c68f0 h1:02gSx3Oj3cLlBMed+9IWBUGHThEZMnCNiR67yaQbpqo=
+github.com/goplus/llgo v0.9.4-0.20240729010130-b3b4f55c68f0/go.mod h1:zsrtWZapL4aklZc99xBSZRynGzLTIT1mLRjP0VSn9iw=
