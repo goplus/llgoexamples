@@ -25,10 +25,8 @@ func AppendToResponseHeader(userdata c.Pointer, name *uint8, nameLen uintptr, va
 
 func (resp *Response) PrintHeaders() {
 	for key, values := range resp.Header {
-		fmt.Printf("%s: ", key)
 		for _, value := range values {
-			fmt.Printf(value + "; ")
+			fmt.Printf("%s: %s\n", key, value)
 		}
-		fmt.Printf("\n")
 	}
 }

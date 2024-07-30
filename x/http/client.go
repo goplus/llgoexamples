@@ -2,63 +2,127 @@ package http
 
 import (
 	"fmt"
+	io2 "io"
 	"strconv"
 	"strings"
+	"unsafe"
 
 	"github.com/goplus/llgo/c"
+	"github.com/goplus/llgo/c/libuv"
 	"github.com/goplus/llgo/c/net"
-	"github.com/goplus/llgo/c/os"
-	"github.com/goplus/llgo/c/sys"
 	"github.com/goplus/llgo/c/syscall"
 	"github.com/goplus/llgoexamples/rust/hyper"
 )
 
 type ConnData struct {
-	Fd         c.Int
-	ReadWaker  *hyper.Waker
-	WriteWaker *hyper.Waker
+	TcpHandle     libuv.Tcp
+	ConnectReq    libuv.Connect
+	ReadBuf       libuv.Buf
+	ReadBufFilled uintptr
+	ReadWaker     *hyper.Waker
+	WriteWaker    *hyper.Waker
 }
 
-type RequestConfig struct {
-	ReqMethod      string
-	ReqHost        string
-	ReqPort        string
-	ReqUri         string
-	ReqHeaders     map[string]string
-	ReqHTTPVersion hyper.HTTPVersion
-	TimeoutSec     int64
-	TimeoutUsec    int32
-	//ReqBody
-	//ReqURIParts
+type Client struct {
+	Transport RoundTripper
 }
 
-func Get(url string) *Response {
-	host, port, uri := parseURL(url)
-	req := hyper.NewRequest()
+var DefaultClient = &Client{}
 
+type RoundTripper interface {
+	RoundTrip(*hyper.Request) (*Response, error)
+}
+
+func (c *Client) transport() RoundTripper {
+	if c.Transport != nil {
+		return c.Transport
+	}
+	return DefaultTransport
+}
+
+func Get2(url string) (*Response, error) {
+	return DefaultClient.Get(url)
+}
+
+func (c *Client) Get(url string) (*Response, error) {
+	req, err := NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	return c.Do(req)
+}
+
+func (c *Client) Do(req *hyper.Request) (*Response, error) {
+	return c.do(req)
+}
+
+func (c *Client) do(req *hyper.Request) (*Response, error) {
+	return c.send(req, nil)
+}
+
+func (c *Client) send(req *hyper.Request, deadline any) (*Response, error) {
+	return send(req, c.transport(), deadline)
+}
+
+func send(req *hyper.Request, rt RoundTripper, deadline any) (resp *Response, err error) {
+	return rt.RoundTrip(req)
+}
+
+func NewRequest(method, url string, body io2.Reader) (*hyper.Request, error) {
+	host, _, uri := parseURL(url)
 	// Prepare the request
+	req := hyper.NewRequest()
 	// Set the request method and uri
-	if req.SetMethod((*uint8)(&[]byte("GET")[0]), c.Strlen(c.Str("GET"))) != hyper.OK {
-		panic(fmt.Sprintf("error setting method %s\n", "GET"))
+	if req.SetMethod((*uint8)(&[]byte(method)[0]), c.Strlen(c.AllocaCStr(method))) != hyper.OK {
+		return nil, fmt.Errorf("error setting method %s\n", method)
 	}
 	if req.SetURI((*uint8)(&[]byte(uri)[0]), c.Strlen(c.AllocaCStr(uri))) != hyper.OK {
-		panic(fmt.Sprintf("error setting uri %s\n", uri))
+		return nil, fmt.Errorf("error setting uri %s\n", uri)
 	}
 
 	// Set the request headers
 	reqHeaders := req.Headers()
 	if reqHeaders.Set((*uint8)(&[]byte("Host")[0]), c.Strlen(c.Str("Host")), (*uint8)(&[]byte(host)[0]), c.Strlen(c.AllocaCStr(host))) != hyper.OK {
-		panic("error setting headers\n")
+		return nil, fmt.Errorf("error setting headers\n")
+	}
+	return req, nil
+}
+
+func Get(url string) (_ *Response, err error) {
+	host, port, uri := parseURL(url)
+
+	loop := libuv.DefaultLoop()
+	conn := (*ConnData)(c.Malloc(unsafe.Sizeof(ConnData{})))
+	if conn == nil {
+		return nil, fmt.Errorf("Failed to allocate memory for conn_data\n")
 	}
 
-	//var response RequestResponse
+	libuv.InitTcp(loop, &conn.TcpHandle)
+	//conn.TcpHandle.Data = c.Pointer(conn)
+	(*libuv.Handle)(c.Pointer(&conn.TcpHandle)).SetData(c.Pointer(conn))
 
-	fd := ConnectTo(host, port)
+	var hints net.AddrInfo
+	c.Memset(c.Pointer(&hints), 0, unsafe.Sizeof(hints))
+	hints.Family = syscall.AF_UNSPEC
+	hints.SockType = syscall.SOCK_STREAM
 
-	connData := NewConnData(fd)
+	var res *net.AddrInfo
+	status := net.Getaddrinfo(c.AllocaCStr(host), c.AllocaCStr(port), &hints, &res)
+	if status != 0 {
+		return nil, fmt.Errorf("getaddrinfo error\n")
+	}
+
+	//conn.ConnectReq.Data = c.Pointer(conn)
+	(*libuv.Req)(c.Pointer(&conn.ConnectReq)).SetData(c.Pointer(conn))
+	status = libuv.TcpConnect(&conn.ConnectReq, &conn.TcpHandle, res.Addr, OnConnect)
+	if status != 0 {
+		return nil, fmt.Errorf("connect error: %s\n", c.GoString(libuv.Strerror(libuv.Errno(status))))
+	}
+
+	net.Freeaddrinfo(res)
 
 	// Hookup the IO
-	io := NewIoWithConnReadWrite(connData)
+	io := NewIoWithConnReadWrite(conn)
 
 	// We need an executor generally to poll futures
 	exec := hyper.NewExecutor()
@@ -73,8 +137,7 @@ func Get(url string) *Response {
 	// Let's wait for the handshake to finish...
 	exec.Push(handshakeTask)
 
-	var fdsRead, fdsWrite, fdsExcep syscall.FdSet
-	var err *hyper.Error
+	var hyperErr *hyper.Error
 	var response Response
 
 	// The polling state machine!
@@ -82,7 +145,6 @@ func Get(url string) *Response {
 		// Poll all ready tasks and act on them...
 		for {
 			task := exec.Poll()
-
 			if task == nil {
 				break
 			}
@@ -91,23 +153,41 @@ func Get(url string) *Response {
 			case hyper.ExampleHandshake:
 				if task.Type() == hyper.TaskError {
 					c.Printf(c.Str("handshake error!\n"))
-					err = (*hyper.Error)(task.Value())
-					Fail(err)
+					hyperErr = (*hyper.Error)(task.Value())
+					err = Fail(hyperErr)
+					return nil, err
 				}
 				if task.Type() != hyper.TaskClientConn {
 					c.Printf(c.Str("unexpected task type\n"))
-					Fail(err)
+					err = Fail(hyperErr)
+					return nil, err
 				}
 
 				client := (*hyper.ClientConn)(task.Value())
 				task.Free()
+
+				// Prepare the request
+				req := hyper.NewRequest()
+				// Set the request method and uri
+				if req.SetMethod((*uint8)(&[]byte("GET")[0]), c.Strlen(c.Str("GET"))) != hyper.OK {
+					return nil, fmt.Errorf("error setting method %s\n", "GET")
+				}
+				if req.SetURI((*uint8)(&[]byte(uri)[0]), c.Strlen(c.AllocaCStr(uri))) != hyper.OK {
+					return nil, fmt.Errorf("error setting uri %s\n", uri)
+				}
+
+				// Set the request headers
+				reqHeaders := req.Headers()
+				if reqHeaders.Set((*uint8)(&[]byte("Host")[0]), c.Strlen(c.Str("Host")), (*uint8)(&[]byte(host)[0]), c.Strlen(c.AllocaCStr(host))) != hyper.OK {
+					return nil, fmt.Errorf("error setting headers\n")
+				}
 
 				// Send it!
 				sendTask := client.Send(req)
 				SetUserData(sendTask, hyper.ExampleSend)
 				sendRes := exec.Push(sendTask)
 				if sendRes != hyper.OK {
-					panic("error send\n")
+					return nil, fmt.Errorf("error send\n")
 				}
 
 				// For this example, no longer need the client
@@ -117,12 +197,14 @@ func Get(url string) *Response {
 			case hyper.ExampleSend:
 				if task.Type() == hyper.TaskError {
 					c.Printf(c.Str("send error!\n"))
-					err = (*hyper.Error)(task.Value())
-					Fail(err)
+					hyperErr = (*hyper.Error)(task.Value())
+					err = Fail(hyperErr)
+					return nil, err
 				}
 				if task.Type() != hyper.TaskResponse {
 					c.Printf(c.Str("unexpected task type\n"))
-					Fail(err)
+					err = Fail(hyperErr)
+					return nil, err
 				}
 
 				// Take the results
@@ -139,133 +221,127 @@ func Get(url string) *Response {
 				headers.Foreach(AppendToResponseHeader, c.Pointer(&response))
 				respBody := resp.Body()
 
+				response.Body, response.respBodyWriter = io2.Pipe()
+
+				/*go func() {
+					fmt.Println("writing...")
+					for {
+						fmt.Println("writing for...")
+						dataTask := respBody.Data()
+						exec.Push(dataTask)
+						dataTask = exec.Poll()
+						if dataTask.Type() == hyper.TaskBuf {
+							buf := (*hyper.Buf)(dataTask.Value())
+							len := buf.Len()
+							bytes := unsafe.Slice((*byte)(buf.Bytes()), len)
+							_, err := response.respBodyWriter.Write(bytes)
+							if err != nil {
+								fmt.Printf("Failed to write response body: %v\n", err)
+								break
+							}
+							dataTask.Free()
+						} else if dataTask.Type() == hyper.TaskEmpty {
+							fmt.Println("writing empty")
+							dataTask.Free()
+							break
+						}
+					}
+					fmt.Println("end writing")
+					defer response.respBodyWriter.Close()
+				}()*/
+
 				foreachTask := respBody.Foreach(AppendToResponseBody, c.Pointer(&response))
 
 				SetUserData(foreachTask, hyper.ExampleRespBody)
 				exec.Push(foreachTask)
 
+				return &response, nil
+
 				// No longer need the response
-				resp.Free()
+				//resp.Free()
 
 				break
 			case hyper.ExampleRespBody:
+				println("ExampleRespBody")
 				if task.Type() == hyper.TaskError {
 					c.Printf(c.Str("body error!\n"))
-					err = (*hyper.Error)(task.Value())
-					Fail(err)
+					hyperErr = (*hyper.Error)(task.Value())
+					err = Fail(hyperErr)
+					return nil, err
 				}
 				if task.Type() != hyper.TaskEmpty {
 					c.Printf(c.Str("unexpected task type\n"))
-					Fail(err)
+					err = Fail(hyperErr)
+					return nil, err
 				}
 
 				// Cleaning up before exiting
 				task.Free()
 				exec.Free()
-				FreeConnData(connData)
+				(*libuv.Handle)(c.Pointer(&conn.TcpHandle)).Close(nil)
 
-				if response.respBodyWriter != nil {
-					defer response.respBodyWriter.Close()
-				}
+				FreeConnData(conn)
 
-				return &response
+				//if response.respBodyWriter != nil {
+				//	defer response.respBodyWriter.Close()
+				//}
+
+				return &response, nil
 			case hyper.ExampleNotSet:
+				println("ExampleNotSet")
 				// A background task for hyper_client completed...
 				task.Free()
 				break
 			}
 		}
 
-		// All futures are pending on IO work, so select on the fds.
-
-		sys.FD_ZERO(&fdsRead)
-		sys.FD_ZERO(&fdsWrite)
-		sys.FD_ZERO(&fdsExcep)
-
-		if connData.ReadWaker != nil {
-			sys.FD_SET(connData.Fd, &fdsRead)
-		}
-		if connData.WriteWaker != nil {
-			sys.FD_SET(connData.Fd, &fdsWrite)
-		}
-
-		// Set the default request timeout
-		var tv syscall.Timeval
-		tv.Sec = 10
-
-		selRet := sys.Select(connData.Fd+1, &fdsRead, &fdsWrite, &fdsExcep, &tv)
-		if selRet < 0 {
-			panic("select() error\n")
-		} else if selRet == 0 {
-			panic("select() timeout\n")
-		}
-
-		if sys.FD_ISSET(connData.Fd, &fdsRead) != 0 {
-			connData.ReadWaker.Wake()
-			connData.ReadWaker = nil
-		}
-
-		if sys.FD_ISSET(connData.Fd, &fdsWrite) != 0 {
-			connData.WriteWaker.Wake()
-			connData.WriteWaker = nil
-		}
+		libuv.Run(loop, libuv.RUN_ONCE)
 	}
 }
 
-// ConnectTo connects to a host and port
-func ConnectTo(host string, port string) c.Int {
-	var hints net.AddrInfo
-	hints.Family = net.AF_UNSPEC
-	hints.SockType = net.SOCK_STREAM
-
-	var result, rp *net.AddrInfo
-
-	if net.Getaddrinfo(c.AllocaCStr(host), c.AllocaCStr(port), &hints, &result) != 0 {
-		panic(fmt.Sprintf("dns failed for %s\n", host))
+// AllocBuffer allocates a buffer for reading from a socket
+func AllocBuffer(handle *libuv.Handle, suggestedSize uintptr, buf *libuv.Buf) {
+	//conn := (*ConnData)(handle.Data)
+	//conn := (*struct{ data *ConnData })(c.Pointer(handle)).data
+	conn := (*ConnData)(handle.GetData())
+	if conn.ReadBuf.Base == nil {
+		conn.ReadBuf = libuv.InitBuf((*c.Char)(c.Malloc(suggestedSize)), c.Uint(suggestedSize))
+		conn.ReadBufFilled = 0
 	}
-
-	var sfd c.Int
-	for rp = result; rp != nil; rp = rp.Next {
-		sfd = net.Socket(rp.Family, rp.SockType, rp.Protocol)
-		if sfd == -1 {
-			continue
-		}
-		if net.Connect(sfd, rp.Addr, rp.AddrLen) != -1 {
-			break
-		}
-		os.Close(sfd)
-	}
-
-	net.Freeaddrinfo(result)
-
-	// no address succeeded
-	if rp == nil || sfd < 0 {
-		panic(fmt.Sprintf("connect failed for %s\n", host))
-	}
-
-	if os.Fcntl(sfd, os.F_SETFL, os.O_NONBLOCK) != 0 {
-		panic("failed to set net to non-blocking\n")
-	}
-	return sfd
+	*buf = libuv.InitBuf((*c.Char)(c.Pointer(uintptr(c.Pointer(conn.ReadBuf.Base))+conn.ReadBufFilled)), c.Uint(suggestedSize-conn.ReadBufFilled))
 }
 
-// ReadCallBack is the callback for reading from a socket
+// OnRead is the libuv callback for reading from a socket
+func OnRead(stream *libuv.Stream, nread c.Long, buf *libuv.Buf) {
+	//conn := (*ConnData)(stream.Data)
+	//conn := (*struct{ data *ConnData })(c.Pointer(stream)).data
+	conn := (*ConnData)((*libuv.Handle)(c.Pointer(stream)).GetData())
+	if nread > 0 {
+		conn.ReadBufFilled += uintptr(nread)
+	}
+	if conn.ReadWaker != nil {
+		conn.ReadWaker.Wake()
+		conn.ReadWaker = nil
+	}
+}
+
+// ReadCallBack is the hyper callback for reading from a socket
 func ReadCallBack(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen uintptr) uintptr {
 	conn := (*ConnData)(userdata)
 
-	ret := os.Read(conn.Fd, c.Pointer(buf), bufLen)
-
-	if ret >= 0 {
-		return uintptr(ret)
+	if conn.ReadBufFilled > 0 {
+		var toCopy uintptr
+		if bufLen < conn.ReadBufFilled {
+			toCopy = bufLen
+		} else {
+			toCopy = conn.ReadBufFilled
+		}
+		c.Memcpy(c.Pointer(buf), c.Pointer(conn.ReadBuf.Base), toCopy)
+		c.Memmove(c.Pointer(conn.ReadBuf.Base), c.Pointer(uintptr(c.Pointer(conn.ReadBuf.Base))+toCopy), conn.ReadBufFilled-toCopy)
+		conn.ReadBufFilled -= toCopy
+		return toCopy
 	}
 
-	if os.Errno != os.EAGAIN {
-		c.Perror(c.Str("[read callback fail]"))
-		// kaboom
-		return hyper.IoError
-	}
-
-	// would block, register interest
 	if conn.ReadWaker != nil {
 		conn.ReadWaker.Free()
 	}
@@ -273,27 +349,50 @@ func ReadCallBack(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen uin
 	return hyper.IoPending
 }
 
-// WriteCallBack is the callback for writing to a socket
+// OnWrite is the libuv callback for writing to a socket
+func OnWrite(req *libuv.Write, status c.Int) {
+	//conn := (*ConnData)(req.Data)
+	//conn := (*struct{ data *ConnData })(c.Pointer(req)).data
+	conn := (*ConnData)((*libuv.Req)(c.Pointer(req)).GetData())
+
+	if conn.WriteWaker != nil {
+		conn.WriteWaker.Wake()
+		conn.WriteWaker = nil
+	}
+	c.Free(c.Pointer(req))
+}
+
+// WriteCallBack is the hyper callback for writing to a socket
 func WriteCallBack(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen uintptr) uintptr {
 	conn := (*ConnData)(userdata)
-	ret := os.Write(conn.Fd, c.Pointer(buf), bufLen)
+	initBuf := libuv.InitBuf((*c.Char)(c.Pointer(buf)), c.Uint(bufLen))
+	req := (*libuv.Write)(c.Malloc(unsafe.Sizeof(libuv.Write{})))
+	//req.Data = c.Pointer(conn)
+	(*libuv.Req)(c.Pointer(req)).SetData(c.Pointer(conn))
+	ret := req.Write((*libuv.Stream)(c.Pointer(&conn.TcpHandle)), &initBuf, 1, OnWrite)
 
-	if int(ret) >= 0 {
-		return uintptr(ret)
+	if ret >= 0 {
+		return bufLen
 	}
 
-	if os.Errno != os.EAGAIN {
-		c.Perror(c.Str("[write callback fail]"))
-		// kaboom
-		return hyper.IoError
-	}
-
-	// would block, register interest
 	if conn.WriteWaker != nil {
 		conn.WriteWaker.Free()
 	}
 	conn.WriteWaker = ctx.Waker()
 	return hyper.IoPending
+}
+
+// OnConnect is the libuv callback for a successful connection
+func OnConnect(req *libuv.Connect, status c.Int) {
+	//conn := (*ConnData)(req.Data)
+	//conn := (*struct{ data *ConnData })(c.Pointer(req)).data
+	conn := (*ConnData)((*libuv.Req)(c.Pointer(req)).GetData())
+
+	if status < 0 {
+		c.Fprintf(c.Stderr, c.Str("connect error: %d\n"), libuv.Strerror(libuv.Errno(status)))
+		return
+	}
+	(*libuv.Stream)(c.Pointer(&conn.TcpHandle)).StartRead(AllocBuffer, OnRead)
 }
 
 // FreeConnData frees the connection data
@@ -306,10 +405,15 @@ func FreeConnData(conn *ConnData) {
 		conn.WriteWaker.Free()
 		conn.WriteWaker = nil
 	}
+	if conn.ReadBuf.Base != nil {
+		c.Free(c.Pointer(conn.ReadBuf.Base))
+		conn.ReadBuf.Base = nil
+	}
+	c.Free(c.Pointer(conn))
 }
 
 // Fail prints the error details and panics
-func Fail(err *hyper.Error) {
+func Fail(err *hyper.Error) error {
 	if err != nil {
 		c.Printf(c.Str("error code: %d\n"), err.Code())
 		// grab the error details
@@ -317,22 +421,12 @@ func Fail(err *hyper.Error) {
 		errLen := err.Print((*uint8)(c.Pointer(&errBuf[:][0])), uintptr(len(errBuf)))
 
 		c.Printf(c.Str("details: %.*s\n"), c.Int(errLen), c.Pointer(&errBuf[:][0]))
-		c.Printf(c.Str("details: "))
-		for i := 0; i < int(errLen); i++ {
-			c.Printf(c.Str("%c"), errBuf[i])
-		}
-		c.Printf(c.Str("\n"))
 
 		// clean up the error
 		err.Free()
-		panic("request failed\n")
+		return fmt.Errorf("hyper error\n")
 	}
-	return
-}
-
-// NewConnData creates a new connection data
-func NewConnData(fd c.Int) *ConnData {
-	return &ConnData{Fd: fd, ReadWaker: nil, WriteWaker: nil}
+	return nil
 }
 
 // NewIoWithConnReadWrite creates a new IO with read and write callbacks
@@ -342,6 +436,12 @@ func NewIoWithConnReadWrite(connData *ConnData) *hyper.Io {
 	io.SetRead(ReadCallBack)
 	io.SetWrite(WriteCallBack)
 	return io
+}
+
+// SetUserData Set the user data for the task
+func SetUserData(task *hyper.Task, userData hyper.ExampleId) {
+	var data = userData
+	task.SetUserdata(c.Pointer(uintptr(data)))
 }
 
 // parseURL Parse the URL and extract the host name, port number, and URI
@@ -383,6 +483,5 @@ func parseURL(rawURL string) (hostname, port, uri string) {
 		//}
 		port = "80"
 	}
-
 	return
 }
