@@ -14,28 +14,40 @@ const BUFFER_SIZE = 1024
 var (
 	loop     *libuv.Loop
 	openReq  libuv.Fs
-	readReq  libuv.Fs
 	closeReq libuv.Fs
 
 	buffer [BUFFER_SIZE]c.Char
 	iov    libuv.Buf
+	file   int
 )
 
 func main() {
 	//fmt.Printf("libuv version: %d\n", libuv.Version())
-	loop = &libuv.Loop{Loop: libuv.DefaultLoop()}
+	loop = libuv.DefaultLoop()
+	openReq = libuv.NewFs()
+	closeReq = libuv.NewFs()
 
 	// Open the file
-	openReq.Open(loop, "example.txt", os.O_RDONLY, 0, onOpen)
+	result := openReq.Open(loop, "example.txt", os.O_RDONLY, 0, onOpen)
+	if result != 0 {
+		fmt.Printf("Error in Open: %s (code: %d)\n", libuv.Strerror(result), result)
+		return
+	}
 
 	// Run the loop
-	loop.Run(libuv.RUN_DEFAULT)
+	res := loop.Run(libuv.RUN_DEFAULT)
+	if res != 0 {
+		fmt.Printf("Error in Run: %s\n", libuv.Strerror(res))
+		loop.Stop()
+	}
+	fmt.Printf("loop.Run(libuv.RUN_DEFAULT) = %d\n", res)
 
 	// Cleanup
 	defer cleanup()
 }
 
 func onOpen(req *libuv.Fs) {
+	fmt.Println("onOpen")
 	// Check for errors
 	if req.GetResult() < 0 {
 		fmt.Printf("Error opening file: %s\n", libuv.Strerror(req.GetResult()))
@@ -43,18 +55,33 @@ func onOpen(req *libuv.Fs) {
 		return
 	}
 
+	// Store the file descriptor
+	file = req.GetResult()
+
 	// Init buffer
 	iov = libuv.InitBuf(buffer[:])
+
 	// Read the file
-	readRes := readReq.Read(loop, req.GetResult(), iov, 1, -1, onRead)
+	readFile()
+}
+
+func readFile() {
+	// Initialize the request every time
+	readReq := libuv.NewFs()
+
+	// Read the file
+	readRes := readReq.Read(loop, file, iov, 1, -1, onRead)
 	if readRes != 0 {
-		fmt.Printf("Error in FsRead: %s (code: %d)\n", libuv.Strerror(req.GetResult()), readRes)
+		fmt.Printf("Error in FsRead: %s (code: %d)\n", libuv.Strerror(readReq.GetResult()), readRes)
 		loop.Stop()
 		return
 	}
 }
 
 func onRead(req *libuv.Fs) {
+	fmt.Println("onRead")
+	// Cleanup the request
+	defer req.Cleanup()
 	// Check for errors
 	if req.GetResult() < 0 {
 		fmt.Printf("Read error: %s\n", libuv.Strerror(req.GetResult()))
@@ -73,16 +100,12 @@ func onRead(req *libuv.Fs) {
 			req.GetResult(),
 			(*[BUFFER_SIZE]byte)(unsafe.Pointer(&buffer[0]))[:])
 		// Read the file again
-		readRes := readReq.Read(loop, openReq.GetResult(), iov, 1, -1, onRead)
-		if readRes != 0 {
-			fmt.Printf("Error in FsRead: %s (code: %d)\n", libuv.Strerror(req.GetResult()), readRes)
-			loop.Stop()
-			return
-		}
+		readFile()
 	}
 }
 
 func onClose(req *libuv.Fs) {
+	fmt.Println("onClose")
 	// Check for errors
 	if req.GetResult() < 0 {
 		fmt.Printf("Error closing file: %s\n", libuv.Strerror(req.GetResult()))
@@ -94,8 +117,10 @@ func onClose(req *libuv.Fs) {
 func cleanup() {
 	// Cleanup the requests
 	openReq.Cleanup()
-	readReq.Cleanup()
 	closeReq.Cleanup()
 	// Close the loop
-	loop.Close()
+	result := loop.Close()
+	if result != 0 {
+		fmt.Printf("Error in LoopClose: %s\n", libuv.Strerror(result))
+	}
 }

@@ -26,40 +26,12 @@ type Handle struct {
 	*libuv.Handle
 }
 
-type Dir struct {
-	*libuv.Dir
-}
-
 type Stream struct {
 	*libuv.Stream
 }
 
-type Pipe struct {
-	*libuv.Pipe
-}
-
 type Poll struct {
 	*libuv.Poll
-}
-
-type Prepare struct {
-	*libuv.Prepare
-}
-
-type Check struct {
-	*libuv.Check
-}
-
-type Idle struct {
-	*libuv.Idle
-}
-
-type Async struct {
-	*libuv.Async
-}
-
-type Process struct {
-	*libuv.Process
 }
 
 type Req struct {
@@ -90,8 +62,6 @@ type Buf struct {
 	*libuv.Buf
 }
 
-type Buffer libuv.Buf
-
 type WalkCb func(handle *Handle, arg c.Pointer)
 
 func convertWalkCb(callback WalkCb) func(handle *libuv.Handle, arg c.Pointer) {
@@ -102,8 +72,8 @@ func convertWalkCb(callback WalkCb) func(handle *libuv.Handle, arg c.Pointer) {
 }
 
 // DefaultLoop returns the default loop.
-func DefaultLoop() *libuv.Loop {
-	return libuv.LoopDefault()
+func DefaultLoop() *Loop {
+	return &Loop{Loop: libuv.DefaultLoop()}
 }
 
 // Size returns the size of the loop.
