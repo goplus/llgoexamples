@@ -26,6 +26,8 @@ func main() {
 	loop = libuv.DefaultLoop()
 	openReq = libuv.NewFs()
 	closeReq = libuv.NewFs()
+	// Cleanup
+	defer cleanup()
 
 	// Open the file
 	result := openReq.Open(loop, "example.txt", os.O_RDONLY, 0, onOpen)
@@ -39,15 +41,13 @@ func main() {
 	if res != 0 {
 		fmt.Printf("Error in Run: %s\n", libuv.Strerror(res))
 		loop.Stop()
+		os.Exit(c.Int(res))
 	}
-	fmt.Printf("loop.Run(libuv.RUN_DEFAULT) = %d\n", res)
 
-	// Cleanup
-	defer cleanup()
+	os.Exit(c.Int(res))
 }
 
 func onOpen(req *libuv.Fs) {
-	fmt.Println("onOpen")
 	// Check for errors
 	if req.GetResult() < 0 {
 		fmt.Printf("Error opening file: %s\n", libuv.Strerror(req.GetResult()))
@@ -79,7 +79,6 @@ func readFile() {
 }
 
 func onRead(req *libuv.Fs) {
-	fmt.Println("onRead")
 	// Cleanup the request
 	defer req.Cleanup()
 	// Check for errors
@@ -105,7 +104,6 @@ func onRead(req *libuv.Fs) {
 }
 
 func onClose(req *libuv.Fs) {
-	fmt.Println("onClose")
 	// Check for errors
 	if req.GetResult() < 0 {
 		fmt.Printf("Error closing file: %s\n", libuv.Strerror(req.GetResult()))
