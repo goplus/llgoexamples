@@ -5,6 +5,10 @@ import (
 	"github.com/goplus/llgo/c/libuv"
 )
 
+const (
+	EOF = libuv.EOF
+)
+
 type Errno struct {
 	libuv.Errno
 }

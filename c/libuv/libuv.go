@@ -18,45 +18,64 @@ const (
 	METRICS_IDLE_TIME = libuv.METRICS_IDLE_TIME
 )
 
+const (
+	UV_LEAVE_GROUP = libuv.UV_LEAVE_GROUP
+	UV_JOIN_GROUP  = libuv.UV_JOIN_GROUP
+)
+
+const (
+	UNKNOWN_HANDLE  = libuv.UNKNOWN_HANDLE
+	ASYNC           = libuv.ASYNC
+	CHECK           = libuv.CHECK
+	FS_EVENT        = libuv.FS_EVENT
+	FS_POLL         = libuv.FS_POLL
+	HANDLE          = libuv.HANDLE
+	IDLE            = libuv.IDLE
+	NAMED_PIPE      = libuv.NAMED_PIPE
+	POLL            = libuv.POLL
+	PREPARE         = libuv.PREPARE
+	PROCESS         = libuv.PROCESS
+	STREAM          = libuv.STREAM
+	TCP             = libuv.TCP
+	TIMER           = libuv.TIMER
+	TTY             = libuv.TTY
+	UDP             = libuv.UDP
+	SIGNAL          = libuv.SIGNAL
+	FILE            = libuv.FILE
+	HANDLE_TYPE_MAX = libuv.HANDLE_TYPE_MAX
+)
+
+const (
+	UNKNOWN_REQ      = libuv.UNKNOWN_REQ
+	REQ              = libuv.REQ
+	CONNECT          = libuv.CONNECT
+	WRITE            = libuv.WRITE
+	SHUTDOWN         = libuv.SHUTDOWN
+	UDP_SEND         = libuv.UDP_SEND
+	FS               = libuv.FS
+	WORK             = libuv.WORK
+	GETADDRINFO      = libuv.GETADDRINFO
+	GETNAMEINFO      = libuv.GETNAMEINFO
+	RANDOM           = libuv.RANDOM
+	REQ_TYPE_PRIVATE = libuv.REQ_TYPE_PRIVATE
+	REQ_TYPE_MAX     = libuv.REQ_TYPE_MAX
+)
+
+const (
+	READABLE       = libuv.READABLE
+	WRITABLE       = libuv.WRITABLE
+	DISCONNECT     = libuv.DISCONNECT
+	PRIPRIORITIZED = libuv.PRIPRIORITIZED
+)
+
 type Loop struct {
 	*libuv.Loop
 	WalkCb WalkCb
 }
 
-type Handle struct {
-	*libuv.Handle
-}
-
-type Stream struct {
-	*libuv.Stream
-}
-
 type Poll struct {
 	*libuv.Poll
-}
-
-type Req struct {
-	*libuv.Req
-}
-
-type GetAddrInfo struct {
-	*libuv.GetAddrInfo
-}
-
-type GetNameInfo struct {
-	*libuv.GetNameInfo
-}
-
-type Shutdown struct {
-	*libuv.Shutdown
-}
-
-type Write struct {
-	*libuv.Write
-}
-
-type Connect struct {
-	*libuv.Connect
+	PollCb func(handle *Poll, status c.Int, events c.Int)
 }
 
 type Buf struct {
@@ -64,6 +83,41 @@ type Buf struct {
 }
 
 type WalkCb func(handle *Handle, arg c.Pointer)
+
+type PollCb func(handle *Poll, status c.Int, events c.Int)
+
+type MallocFunc func(size uintptr) c.Pointer
+
+type ReallocFunc func(ptr c.Pointer, size uintptr) c.Pointer
+
+type CallocFunc func(count uintptr, size uintptr) c.Pointer
+
+type FreeFunc func(ptr c.Pointer)
+
+// ----------------------------------------------
+
+// Version returns the version of the libuv.
+func Version() uint {
+	return uint(libuv.Version())
+}
+
+// VersionString returns the version string of the libuv.
+func VersionString() string {
+	return c.GoString(libuv.VersionString())
+}
+
+// LibraryShutdown closes the library.
+func LibraryShutdown() {
+	libuv.LibraryShutdown()
+}
+
+// ReplaceAllocator replaces the allocator.
+// TODO
+//func ReplaceAllocator(mallocFunc libuv.MallocFunc, reallocFunc libuv.ReallocFunc, callocFunc libuv.CallocFunc, freeFunc libuv.FreeFunc) {
+//	libuv.ReplaceAllocator(mallocFunc, reallocFunc, callocFunc, freeFunc)
+//}
+
+// ----------------------------------------------
 
 // DefaultLoop returns the default loop.
 func DefaultLoop() *Loop {
@@ -163,4 +217,32 @@ func (l *Loop) BackendTimeout() int {
 func InitBuf(buffer []c.Char) Buf {
 	buf := libuv.InitBuf((*c.Char)(unsafe.Pointer(&buffer[0])), c.Uint(unsafe.Sizeof(buffer)))
 	return Buf{Buf: &buf}
+}
+
+// ----------------------------------------------
+
+/* Poll related function and method */
+
+// PollInit initializes the poll.
+func PollInit(loop *Loop, poll *Poll, fd libuv.OsFd) int {
+	return int(libuv.PollInit(loop.Loop, poll.Poll, fd))
+}
+
+// PollStart starts the poll.
+func PollStart(poll *Poll, events int, cb PollCb) int {
+	poll.PollCb = cb
+	return int(libuv.PollStart(poll.Poll, c.Int(events), func(_handle *libuv.Poll, status c.Int, events c.Int) {
+		handle := (*Poll)(unsafe.Pointer(_handle))
+		handle.PollCb(handle, status, events)
+	}))
+}
+
+// PollStop stops the poll.
+func PollStop(poll *Poll) int {
+	return int(libuv.PollStop(poll.Poll))
+}
+
+// PollInitSocket initializes the poll with the given socket.
+func PollInitSocket(loop *Loop, poll *Poll, socket int) int {
+	return int(libuv.PollInitSocket(loop.Loop, poll.Poll, c.Int(socket)))
 }
