@@ -1,10 +1,2 @@
-github.com/goplus/llgo v0.9.0 h1:yaJzQperGUafEaHc9VlVQVskIngacoTNweEXY0GRi0Q=
-github.com/goplus/llgo v0.9.0/go.mod h1:M3UwiYdPZFyx7m2J0+6Ti1dYVA3uOO1WvSBocuE8N7M=
-github.com/goplus/llgo v0.9.1-0.20240709104849-d6a38a567fda h1:UIPwlgzCb8dV/7WFMyprhZuq8CSLAQIqwFpH5AhrNOM=
-github.com/goplus/llgo v0.9.1-0.20240709104849-d6a38a567fda/go.mod h1:zsrtWZapL4aklZc99xBSZRynGzLTIT1mLRjP0VSn9iw=
-github.com/goplus/llgo v0.9.1-0.20240712060421-858d38d314a3 h1:2fZ2zQ8S58KvOsJTx6s6MHoi6n1K4sqQwIbTauMrgEE=
-github.com/goplus/llgo v0.9.1-0.20240712060421-858d38d314a3/go.mod h1:zsrtWZapL4aklZc99xBSZRynGzLTIT1mLRjP0VSn9iw=
-github.com/goplus/llgo v0.9.2 h1:bzVroPtjT5Ib9qvLk3VYBcKcMS7Sbo5vPRKkqNZUzDk=
-github.com/goplus/llgo v0.9.2/go.mod h1:zsrtWZapL4aklZc99xBSZRynGzLTIT1mLRjP0VSn9iw=
-github.com/goplus/llgo v0.9.3-0.20240725092415-8bcbe7b3c6a4 h1:yrdRLkgEm7J2IFAuHwHMVOa1sqKWGm9RPnjWhmpZTKc=
-github.com/goplus/llgo v0.9.3-0.20240725092415-8bcbe7b3c6a4/go.mod h1:zsrtWZapL4aklZc99xBSZRynGzLTIT1mLRjP0VSn9iw=
+github.com/goplus/llgo v0.9.4 h1:qBn+R6wBQdxLGPc1VITEaxoOmWyZ4ItK9wv789x943o=
+github.com/goplus/llgo v0.9.4/go.mod h1:zsrtWZapL4aklZc99xBSZRynGzLTIT1mLRjP0VSn9iw=

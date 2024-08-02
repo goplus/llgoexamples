@@ -40,7 +40,7 @@ func main() {
 	res := loop.Run(libuv.RUN_DEFAULT)
 	if res != 0 {
 		fmt.Printf("Error in Run: %s\n", libuv.Strerror(res))
-		loop.Stop()
+		loop.Close()
 		os.Exit(c.Int(res))
 	}
 
@@ -51,7 +51,7 @@ func onOpen(req *libuv.Fs) {
 	// Check for errors
 	if req.GetResult() < 0 {
 		fmt.Printf("Error opening file: %s\n", libuv.Strerror(req.GetResult()))
-		loop.Stop()
+		loop.Close()
 		return
 	}
 
@@ -73,7 +73,7 @@ func readFile() {
 	readRes := readReq.Read(loop, file, iov, 1, -1, onRead)
 	if readRes != 0 {
 		fmt.Printf("Error in FsRead: %s (code: %d)\n", libuv.Strerror(readReq.GetResult()), readRes)
-		loop.Stop()
+		loop.Close()
 		return
 	}
 }
@@ -89,7 +89,7 @@ func onRead(req *libuv.Fs) {
 		closeRes := closeReq.Close(loop, openReq.GetResult(), onClose)
 		if closeRes != 0 {
 			fmt.Printf("Error in FsClose: %s (code: %d)\n", libuv.Strerror(req.GetResult()), closeRes)
-			loop.Stop()
+			loop.Close()
 			return
 		}
 	} else {

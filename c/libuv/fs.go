@@ -1,7 +1,6 @@
 package libuv
 
 import (
-	"fmt"
 	"unsafe"
 
 	"github.com/goplus/llgo/c"
@@ -94,38 +93,37 @@ func NewFs() Fs {
 
 // GetType Get the type of the file system request.
 func (f *Fs) GetType() libuv.FsType {
-	return libuv.FsGetType(&f.Fs)
+	return f.Fs.GetType()
 }
 
 // GetPath Get the path of the file system request.
 func (f *Fs) GetPath() string {
-	fmt.Println("GetPath: " + c.GoString(libuv.FsGetPath(&f.Fs)))
-	return c.GoString(libuv.FsGetPath(&f.Fs))
+	return c.GoString(f.Fs.GetPath())
 }
 
 // GetResult Get the result of the file system request.
 func (f *Fs) GetResult() int {
-	return int(libuv.FsGetResult(&f.Fs))
+	return int(f.Fs.GetResult())
 }
 
 // GetPtr Get the pointer of the file system request.
 func (f *Fs) GetPtr() c.Pointer {
-	return libuv.FsGetPtr(&f.Fs)
+	return f.Fs.GetPtr()
 }
 
 // GetSystemError Get the system error of the file system request.
 func (f *Fs) GetSystemError() int {
-	return int(libuv.FsGetSystemError(&f.Fs))
+	return int(f.Fs.GetSystemError())
 }
 
 // GetStatBuf Get the stat buffer of the file system request.
 func (f *Fs) GetStatBuf() *libuv.Stat {
-	return libuv.FsGetStatBuf(&f.Fs)
+	return f.Fs.GetStatBuf()
 }
 
 // Cleanup cleans up the file system request.
 func (f *Fs) Cleanup() {
-	libuv.FsReqCleanup(&f.Fs)
+	f.Fs.ReqCleanup()
 }
 
 // Open opens a file specified by the path with given flags and mode, and returns a file descriptor.
@@ -456,7 +454,7 @@ func (e *FsEvent) Init(loop *Loop) int {
 // Start listening for file events
 func (e *FsEvent) Start(cb FsEventCb, path string, flags int) int {
 	e.FsEventCb = cb
-	return int(libuv.FsEventStart(e.FsEvent, func(_handle *libuv.FsEvent, filename *c.Char, events c.Int, status c.Int) {
+	return int(e.FsEvent.Start(func(_handle *libuv.FsEvent, filename *c.Char, events c.Int, status c.Int) {
 		fsEvent := (*FsEvent)(unsafe.Pointer(_handle))
 		fsEvent.FsEventCb(fsEvent, filename, events, status)
 	}, c.AllocaCStr(path), c.Int(flags)))
@@ -464,17 +462,17 @@ func (e *FsEvent) Start(cb FsEventCb, path string, flags int) int {
 
 // Stop listening for file events
 func (e *FsEvent) Stop() int {
-	return int(libuv.FsEventStop(e.FsEvent))
+	return int(e.FsEvent.Stop())
 }
 
 // Close the file event handle
 func (e *FsEvent) Close() int {
-	return int(libuv.FsEventClose(e.FsEvent))
+	return int(e.FsEvent.Close())
 }
 
 // GetPath Get the path of the file event
-func (e *FsEvent) GetPath() *c.Char {
-	return libuv.FsEventGetpath(e.FsEvent)
+func (e *FsEvent) GetPath() string {
+	return c.GoString(e.FsEvent.Getpath())
 }
 
 // Init Initialize a file poll handle
@@ -485,7 +483,7 @@ func (p *FsPoll) Init(loop *Loop) int {
 // Start polling for file changes
 func (p *FsPoll) Start(cb FsPollCb, path string, interval uint) int {
 	p.FsPollCb = cb
-	return int(libuv.FsPollStart(p.FsPoll, func(_handle *libuv.FsPoll, status c.Int, events c.Int) {
+	return int(p.FsPoll.Start(func(_handle *libuv.FsPoll, status c.Int, events c.Int) {
 		fsPoll := (*FsPoll)(unsafe.Pointer(_handle))
 		fsPoll.FsPollCb(fsPoll, status, events)
 	}, c.AllocaCStr(path), interval))
@@ -493,15 +491,15 @@ func (p *FsPoll) Start(cb FsPollCb, path string, interval uint) int {
 
 // Stop polling for file changes
 func (p *FsPoll) Stop() int {
-	return int(libuv.FsPollStop(p.FsPoll))
+	return int(p.FsPoll.Stop())
 }
 
 // Close the file poll handle
 func (p *FsPoll) Close() int {
-	return int(libuv.FsPollClose(p.FsPoll))
+	return int(p.FsPoll.Close())
 }
 
 // GetPath Get the path of the file poll
 func (p *FsPoll) GetPath() string {
-	return c.GoString(libuv.FsPollGetPath(p.FsPoll))
+	return c.GoString(p.FsPoll.GetPath())
 }

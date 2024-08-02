@@ -20,6 +20,7 @@ const (
 
 type Loop struct {
 	*libuv.Loop
+	WalkCb WalkCb
 }
 
 type Handle struct {
@@ -64,13 +65,6 @@ type Buf struct {
 
 type WalkCb func(handle *Handle, arg c.Pointer)
 
-func convertWalkCb(callback WalkCb) func(handle *libuv.Handle, arg c.Pointer) {
-	return func(handle *libuv.Handle, arg c.Pointer) {
-		hand := &Handle{Handle: handle}
-		callback(hand, arg)
-	}
-}
-
 // DefaultLoop returns the default loop.
 func DefaultLoop() *Loop {
 	return &Loop{Loop: libuv.DefaultLoop()}
@@ -83,17 +77,17 @@ func (l *Loop) Size() uintptr {
 
 // Init initializes the loop.
 func (l *Loop) Init() int {
-	return int(libuv.LoopInit(l.Loop))
+	return int(l.Loop.Init())
 }
 
 // Run runs the loop.
 func (l *Loop) Run(mode libuv.RunMode) int {
-	return int(libuv.Run(l.Loop, mode))
+	return int(l.Loop.Run(mode))
 }
 
 // Stop closes the loop.
-func (l *Loop) Stop() int {
-	return int(libuv.LoopClose(l.Loop))
+func (l *Loop) Stop() {
+	l.Loop.Stop()
 }
 
 // Default creates a new loop.
@@ -109,52 +103,56 @@ func (l *Loop) New() *libuv.Loop {
 // Deprecated: use LoopClose instead.
 // Delete closes the loop.
 func (l *Loop) Delete() int {
-	return int(libuv.LoopDelete(l.Loop))
+	return int(l.Loop.Delete())
 }
 
 // Alive returns the status of the loop.
 func (l *Loop) Alive() int {
-	return int(libuv.LoopAlive(l.Loop))
+	return int(l.Loop.Alive())
 }
 
 // Close closes the loop.
 func (l *Loop) Close() int {
-	return int(libuv.LoopClose(l.Loop))
+	return int(l.Loop.Close())
 }
 
 // Configure configures the loop.
 func (l *Loop) Configure(loop *Loop, option libuv.LoopOption, arg int) int {
-	return int(libuv.LoopConfigure(l.Loop, option, c.Int(arg)))
+	return int(l.Loop.Configure(option, c.Int(arg)))
 }
 
 // Walk walks the loop.
 func (l *Loop) Walk(walkCb WalkCb, arg c.Pointer) {
-	libuv.LoopWalk(l.Loop, convertWalkCb(walkCb), arg)
+	l.WalkCb = walkCb
+	l.Loop.Walk(func(_handle *libuv.Handle, arg c.Pointer) {
+		handle := (*Handle)(unsafe.Pointer(_handle))
+		l.WalkCb(handle, arg)
+	}, arg)
 }
 
 // Fork forks the loop.
 func (l *Loop) Fork(loop *Loop) int {
-	return int(libuv.LoopFork(l.Loop))
+	return int(l.Loop.Fork())
 }
 
 // UpdateTime updates the time of the loop.
 func (l *Loop) UpdateTime() {
-	libuv.LoopUpdateTime(l.Loop)
+	l.Loop.UpdateTime()
 }
 
 // Now returns the current time of the loop.
 func (l *Loop) Now() uint64 {
-	return uint64(libuv.LoopNow(l.Loop))
+	return uint64(l.Loop.Now())
 }
 
 // BackendFd returns the backend file descriptor of the loop.
 func (l *Loop) BackendFd() int {
-	return int(libuv.LoopBackendFd(l.Loop))
+	return int(l.Loop.BackendFd())
 }
 
 // BackendTimeout returns the backend timeout of the loop.
 func (l *Loop) BackendTimeout() int {
-	return int(libuv.LoopBackendTimeout(l.Loop))
+	return int(l.Loop.BackendTimeout())
 }
 
 // ----------------------------------------------
