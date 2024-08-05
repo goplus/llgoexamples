@@ -331,19 +331,19 @@ func (req *Request) OnInformational(callback RequestOnInformationalCallback, dat
 
 // Method get the HTTP Method of the request.
 // llgo:link (*Request).Method C.hyper_request_method
-func (req *Request) Method(method *byte, methodLen c.Ulong) Code {
+func (req *Request) Method(method *byte, methodLen *uintptr) Code {
 	return 0
 }
 
 // URIParts get the URI of the request split into scheme, authority and path/query strings.
 // llgo:link (*Request).URIParts C.hyper_request_uri_parts
-func (req *Request) URIParts(scheme *byte, schemeLen c.Ulong, authority *byte, authorityLen c.Ulong, pathAndQuery *byte, pathAndQueryLen c.Ulong) Code {
+func (req *Request) URIParts(scheme *byte, schemeLen *uintptr, authority *byte, authorityLen *uintptr, pathAndQuery *byte, pathAndQueryLen *uintptr) Code {
 	return 0
 }
 
 // Version set the preferred HTTP version of the request.
 // llgo:link (*Request).Version C.hyper_request_version
-func (req *Request) Version() c.Int {
+func (req *Request) Version() HTTPVersion {
 	return 0
 }
 
