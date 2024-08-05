@@ -39,6 +39,7 @@ const (
 	AbortedByCallback
 	FeatureNotEnabled
 	InvalidPeerMessage
+	InsufficientSpace
 )
 
 type TaskReturnType c.Int
@@ -49,6 +50,7 @@ const (
 	TaskClientConn
 	TaskResponse
 	TaskBuf
+	TaskServerconn
 )
 
 type ExampleId c.Int
@@ -112,6 +114,22 @@ type Waker struct {
 	Unused [0]byte
 }
 
+type Http1ServerconnOptions struct {
+	Unused [0]byte
+}
+
+type Http2ServerconnOptions struct {
+	Unused [0]byte
+}
+
+type ResponseChannel struct {
+	Unused [0]byte
+}
+
+type Service struct {
+	Unused [0]byte
+}
+
 // llgo:type C
 type BodyForeachCallback func(c.Pointer, *Buf) c.Int
 
@@ -122,13 +140,19 @@ type BodyDataCallback func(c.Pointer, *Context, **Buf) c.Int
 type RequestOnInformationalCallback func(c.Pointer, *Response)
 
 // llgo:type C
-type HeadersForeachCallback func(c.Pointer, *uint8, uintptr, *uint8, uintptr) c.Int
+type HeadersForeachCallback func(c.Pointer, *byte, uintptr, *byte, uintptr) c.Int
 
 // llgo:type C
-type IoReadCallback func(c.Pointer, *Context, *uint8, uintptr) uintptr
+type IoReadCallback func(c.Pointer, *Context, *byte, uintptr) uintptr
 
 // llgo:type C
-type IoWriteCallback func(c.Pointer, *Context, *uint8, uintptr) uintptr
+type IoWriteCallback func(c.Pointer, *Context, *byte, uintptr) uintptr
+
+//llgo:type C
+type UserdataDrop func(c.Pointer)
+
+//llgo:type C
+type ServiceCallback func(c.Pointer, *Request, *ResponseChannel)
 
 // Returns a static ASCII (null terminated) string of the hyper_client version.
 // llgo:link Version C.hyper_version
@@ -152,13 +176,13 @@ func (body *Body) Data() *Task {
 
 // Creates a task to execute the callback with each body chunk received.
 // llgo:link (*Body).Foreach C.hyper_body_foreach
-func (body *Body) Foreach(callback BodyForeachCallback, userdata c.Pointer) *Task {
+func (body *Body) Foreach(callback BodyForeachCallback, userdata c.Pointer, drop UserdataDrop) *Task {
 	return nil
 }
 
 // Set userdata on this body, which will be passed to callback functions.
 // llgo:link (*Body).SetUserdata C.hyper_body_set_userdata
-func (body *Body) SetUserdata(userdata c.Pointer) {}
+func (body *Body) SetUserdata(userdata c.Pointer, drop UserdataDrop) {}
 
 // Set the outgoing data callback for this body.
 // llgo:link (*Body).SetDataFunc C.hyper_body_set_data_func
@@ -166,13 +190,13 @@ func (body *Body) SetDataFunc(callback BodyDataCallback) {}
 
 // Create a new `hyper_buf *` by copying the provided bytes.
 // llgo:link CopyBuf C.hyper_buf_copy
-func CopyBuf(buf *uint8, len uintptr) *Buf {
+func CopyBuf(buf *byte, len uintptr) *Buf {
 	return nil
 }
 
 // Get a pointer to the bytes in this buffer.
 // llgo:link (*Buf).Bytes C.hyper_buf_bytes
-func (buf *Buf) Bytes() *uint8 {
+func (buf *Buf) Bytes() *byte {
 	return nil
 }
 
@@ -249,7 +273,7 @@ func (err *Error) Code() Code {
 
 // Print the details of this error to a buffer.
 // llgo:link (*Error).Print C.hyper_error_print
-func (err *Error) Print(dst *uint8, dstLen uintptr) uintptr {
+func (err *Error) Print(dst *byte, dstLen uintptr) uintptr {
 	return 0
 }
 
@@ -265,19 +289,19 @@ func (req *Request) Free() {}
 
 // Set the HTTP Method of the request.
 // llgo:link (*Request).SetMethod C.hyper_request_set_method
-func (req *Request) SetMethod(method *uint8, methodLen uintptr) Code {
+func (req *Request) SetMethod(method *byte, methodLen uintptr) Code {
 	return 0
 }
 
 // Set the URI of the request.
 // llgo:link (*Request).SetURI C.hyper_request_set_uri
-func (req *Request) SetURI(uri *uint8, uriLen uintptr) Code {
+func (req *Request) SetURI(uri *byte, uriLen uintptr) Code {
 	return 0
 }
 
 // Set the URI of the request with separate scheme, authority, and
 // llgo:link (*Request).SetURIParts C.hyper_request_set_uri_parts
-func (req *Request) SetURIParts(scheme *uint8, schemeLen uintptr, authority *uint8, authorityLen uintptr, pathAndQuery *uint8, pathAndQueryLen uintptr) Code {
+func (req *Request) SetURIParts(scheme *byte, schemeLen uintptr, authority *byte, authorityLen uintptr, pathAndQuery *byte, pathAndQueryLen uintptr) Code {
 	return 0
 }
 
@@ -301,7 +325,44 @@ func (req *Request) SetBody(body *Body) Code {
 
 // Set an informational (1xx) response callback.
 // llgo:link (*Request).OnInformational C.hyper_request_on_informational
-func (req *Request) OnInformational(callback RequestOnInformationalCallback, data c.Pointer) Code {
+func (req *Request) OnInformational(callback RequestOnInformationalCallback, data c.Pointer, drop UserdataDrop) Code {
+	return 0
+}
+
+// Method get the HTTP Method of the request.
+// llgo:link (*Request).Method C.hyper_request_method
+func (req *Request) Method(method *byte, methodLen c.Ulong) Code {
+	return 0
+}
+
+// URIParts get the URI of the request split into scheme, authority and path/query strings.
+// llgo:link (*Request).URIParts C.hyper_request_uri_parts
+func (req *Request) URIParts(scheme *byte, schemeLen c.Ulong, authority *byte, authorityLen c.Ulong, pathAndQuery *byte, pathAndQueryLen c.Ulong) Code {
+	return 0
+}
+
+// Version set the preferred HTTP version of the request.
+// llgo:link (*Request).Version C.hyper_request_version
+func (req *Request) Version() c.Int {
+	return 0
+}
+
+// Body take ownership of the body of this request.
+// llgo:link (*Request).Body C.hyper_request_body
+func (req *Request) Body() *Body {
+	return nil
+}
+
+// New construct a new HTTP 200 Ok response
+//
+//go:linkname NewResponse C.hyper_response_new
+func NewResponse() *Response {
+	return nil
+}
+
+// SetBody set the body of the response.
+// llgo:link (*Response).SetBody C.hyper_response_set_body
+func (resp *Response) SetBody(body *Body) Code {
 	return 0
 }
 
@@ -315,15 +376,20 @@ func (resp *Response) Status() uint16 {
 	return 0
 }
 
+// SetStatus sets the HTTP Status-Code of this response.
+// llgo:link (*Response).SetStatus C.hyper_response_set_status
+func (resp *Response) SetStatus(status uint16) {
+}
+
 // Get a pointer to the reason-phrase of this response.
 // llgo:link (*Response).ReasonPhrase C.hyper_response_reason_phrase
-func (resp *Response) ReasonPhrase() *uint8 {
+func (resp *Response) ReasonPhrase() *byte {
 	return nil
 }
 
 // Get the length of the reason-phrase of this response.
 // llgo:link (*Response).ReasonPhraseLen C.hyper_response_reason_phrase_len
-func (resp *Response) ReasonPhraseLen() uintptr {
+func (resp *Response) ReasonPhraseLen() byte {
 	return 0
 }
 
@@ -351,13 +417,13 @@ func (headers *Headers) Foreach(callback HeadersForeachCallback, userdata c.Poin
 
 // Sets the header with the provided name to the provided value.
 // llgo:link (*Headers).Set C.hyper_headers_set
-func (headers *Headers) Set(name *uint8, nameLen uintptr, value *uint8, valueLen uintptr) Code {
+func (headers *Headers) Set(name *byte, nameLen uintptr, value *byte, valueLen uintptr) Code {
 	return 0
 }
 
 // Adds the provided value to the list of the provided name.
 // llgo:link (*Headers).Add C.hyper_headers_add
-func (headers *Headers) Add(name *uint8, nameLen uintptr, value *uint8, valueLen uintptr) Code {
+func (headers *Headers) Add(name *byte, nameLen uintptr, value *byte, valueLen uintptr) Code {
 	return 0
 }
 
@@ -373,7 +439,7 @@ func (io *Io) Free() {}
 
 // Set the user data pointer for this IO to some value.
 // llgo:link (*Io).SetUserdata C.hyper_io_set_userdata
-func (io *Io) SetUserdata(data c.Pointer) {}
+func (io *Io) SetUserdata(data c.Pointer, drop UserdataDrop) {}
 
 // Set the read function for this IO transport.
 // llgo:link (*Io).SetRead C.hyper_io_set_read
@@ -382,6 +448,12 @@ func (io *Io) SetRead(callback IoReadCallback) {}
 // Set the write function for this IO transport.
 // llgo:link (*Io).SetWrite C.hyper_io_set_write
 func (io *Io) SetWrite(callback IoWriteCallback) {}
+
+// GetUserdata set the user data pointer for this IO to some value.
+// llgo:link (*Io).GetUserdata C.hyper_io_get_userdata
+func (io *Io) GetUserdata() c.Pointer {
+	return nil
+}
 
 // Creates a new task executor.
 // llgo:link NewExecutor C.hyper_executor_new
@@ -405,6 +477,12 @@ func (exec *Executor) Poll() *Task {
 	return nil
 }
 
+// NextTimerPop returns the time until the executor will be able to make progress on tasks due to internal timers.
+// llgo:link (*Executor).NextTimerPop C.hyper_executor_next_timer_pop
+func (exec *Executor) NextTimerPop() c.Int {
+	return 0
+}
+
 // Free a task.
 // llgo:link (*Task).Free C.hyper_task_free
 func (task *Task) Free() {}
@@ -423,7 +501,7 @@ func (task *Task) Type() TaskReturnType {
 
 // Set a user data pointer to be associated with this task.
 // llgo:link (*Task).SetUserdata C.hyper_task_set_userdata
-func (task *Task) SetUserdata(userdata c.Pointer) {}
+func (task *Task) SetUserdata(userdata c.Pointer, drop UserdataDrop) {}
 
 // Retrieve the userdata that has been set via `hyper_task_set_userdata`.
 // llgo:link (*Task).Userdata C.hyper_task_userdata
@@ -444,3 +522,169 @@ func (waker *Waker) Free() {}
 // Wake up the task associated with a waker.
 // llgo:link (*Waker).Wake C.hyper_waker_wake
 func (waker *Waker) Wake() {}
+
+// New create a new HTTP/1 serverconn options object.
+//
+//go:linkname Http1ServerconnOptionsNew C.hyper_http1_serverconn_options_new
+func Http1ServerconnOptionsNew(executor *Executor) *Http1ServerconnOptions {
+	return nil
+}
+
+// Free a `Http1ServerconnOptions`.
+// llgo:link (*Http1ServerconnOptions).Free C.hyper_http1_serverconn_options_free
+func (opts *Http1ServerconnOptions) Free() {}
+
+// HalfClose set whether HTTP/1 connections should support half-closures.
+// llgo:link (*Http1ServerconnOptions).HalfClose C.hyper_http1_serverconn_options_half_close
+func (opts *Http1ServerconnOptions) HalfClose(enabled bool) Code {
+	return 0
+}
+
+// KeepAlive enables or disables HTTP/1 keep-alive.
+// llgo:link (*Http1ServerconnOptions).KeepAlive C.hyper_http1_serverconn_options_keep_alive
+func (opts *Http1ServerconnOptions) KeepAlive(enabled bool) Code {
+	return 0
+}
+
+// TitleCaseHeaders set whether HTTP/1 connections will write header names as title case at the socket level.
+// llgo:link (*Http1ServerconnOptions).TitleCaseHeaders C.hyper_http1_serverconn_options_title_case_headers
+func (opts *Http1ServerconnOptions) TitleCaseHeaders(enabled bool) Code {
+	return 0
+}
+
+// HeaderReadTimeout sets a timeout for reading client request headers.
+// If a client does not send a complete set of headers within this time, the connection will be closed.
+// llgo:link (*Http1ServerconnOptions).HeaderReadTimeout C.hyper_http1_serverconn_options_header_read_timeout
+func (opts *Http1ServerconnOptions) HeaderReadTimeout(millis c.UlongLong) Code {
+	return 0
+}
+
+// Writev sets whether HTTP/1 connections should try to use vectored writes, or always flatten into a single buffer.
+// llgo:link (*Http1ServerconnOptions).Writev C.hyper_http1_serverconn_options_writev
+func (opts *Http1ServerconnOptions) Writev(enabled bool) Code {
+	return 0
+}
+
+// MaxBufSize sets the maximum buffer size for the HTTP/1 connection. Must be no lower than 8192.
+// llgo:link (*Http1ServerconnOptions).MaxBufSize C.hyper_http1_serverconn_options_max_buf_size
+func (opts *Http1ServerconnOptions) MaxBufSize(maxBufSize c.Ulong) Code {
+	return 0
+}
+
+// PipelineFlush aggregates flushes to better support pipelined responses.
+// llgo:link (*Http1ServerconnOptions).PipelineFlush C.hyper_http1_serverconn_options_pipeline_flush
+func (opts *Http1ServerconnOptions) PipelineFlush(enabled bool) Code {
+	return 0
+}
+
+// New creates a new HTTP/2 serverconn options object bound to the provided executor.
+//
+//go:linkname Http2ServerconnOptionsNew C.hyper_http2_serverconn_options_new
+func Http2ServerconnOptionsNew(exec *Executor) *Http2ServerconnOptions {
+	return nil
+}
+
+// Free releases resources associated with the Http2ServerconnOptions.
+// llgo:link (*Http2ServerconnOptions).Free C.hyper_http2_serverconn_options_free
+func (opts *Http2ServerconnOptions) Free() {}
+
+// InitialStreamWindowSize sets the `SETTINGS_INITIAL_WINDOW_SIZE` option for HTTP/2 stream-level flow control.
+// llgo:link (*Http2ServerconnOptions).InitialStreamWindowSize C.hyper_http2_serverconn_options_initial_stream_window_size
+func (opts *Http2ServerconnOptions) InitialStreamWindowSize(windowSize c.Uint) Code {
+	return 0
+}
+
+// InitialConnectionWindowSize sets the max connection-level flow control for HTTP/2.
+// llgo:link (*Http2ServerconnOptions).InitialConnectionWindowSize C.hyper_http2_serverconn_options_initial_connection_window_size
+func (opts *Http2ServerconnOptions) InitialConnectionWindowSize(windowSize c.Uint) Code {
+	return 0
+}
+
+// AdaptiveWindow sets whether to use an adaptive flow control.
+// llgo:link (*Http2ServerconnOptions).AdaptiveWindow C.hyper_http2_serverconn_options_adaptive_window
+func (opts *Http2ServerconnOptions) AdaptiveWindow(enabled bool) Code {
+	return 0
+}
+
+// MaxFrameSize sets the maximum frame size to use for HTTP/2.
+// llgo:link (*Http2ServerconnOptions).MaxFrameSize C.hyper_http2_serverconn_options_max_frame_size
+func (opts *Http2ServerconnOptions) MaxFrameSize(frameSize c.Uint) Code {
+	return 0
+}
+
+// MaxConcurrentStreams sets the `SETTINGS_MAX_CONCURRENT_STREAMS` option for HTTP/2 connections.
+// llgo:link (*Http2ServerconnOptions).MaxConcurrentStreams C.hyper_http2_serverconn_options_max_concurrent_streams
+func (opts *Http2ServerconnOptions) MaxConcurrentStreams(maxStreams c.Uint) Code {
+	return 0
+}
+
+// KeepAliveInterval sets an interval for HTTP/2 Ping frames should be sent to keep a connection alive.
+// llgo:link (*Http2ServerconnOptions).KeepAliveInterval C.hyper_http2_serverconn_options_keep_alive_interval
+func (opts *Http2ServerconnOptions) KeepAliveInterval(intervalSeconds c.UlongLong) Code {
+	return 0
+}
+
+// KeepAliveTimeout sets a timeout for receiving an acknowledgement of the keep-alive ping.
+// llgo:link (*Http2ServerconnOptions).KeepAliveTimeout C.hyper_http2_serverconn_options_keep_alive_timeout
+func (opts *Http2ServerconnOptions) KeepAliveTimeout(timeoutSeconds c.UlongLong) Code {
+	return 0
+}
+
+// MaxSendBufSize sets the maximum write buffer size for each HTTP/2 stream.
+// llgo:link (*Http2ServerconnOptions).MaxSendBufSize C.hyper_http2_serverconn_options_max_send_buf_size
+func (opts *Http2ServerconnOptions) MaxSendBufSize(maxBufSize c.Ulong) Code {
+	return 0
+}
+
+// EnableConnectProtocol enables the extended `CONNECT` protocol.
+// llgo:link (*Http2ServerconnOptions).EnableConnectProtocol C.hyper_http2_serverconn_options_enable_connect_protocol
+func (opts *Http2ServerconnOptions) EnableConnectProtocol() Code {
+	return 0
+}
+
+// MaxHeaderListSize sets the max size of received header frames.
+// llgo:link (*Http2ServerconnOptions).MaxHeaderListSize C.hyper_http2_serverconn_options_max_header_list_size
+func (opts *Http2ServerconnOptions) MaxHeaderListSize(max c.Uint) Code {
+	return 0
+}
+
+// New creates a service from a wrapped callback function.
+//
+//go:linkname ServiceNew C.hyper_service_new
+func ServiceNew(serviceFn ServiceCallback) *Service {
+	return nil
+}
+
+// SetUserdata registers opaque userdata with the Service.
+// This userdata must be Send in a rust
+// llgo:link (*Service).SetUserdata C.hyper_service_set_userdata
+func (s *Service) SetUserdata(userdata c.Pointer, drop UserdataDrop) {
+}
+
+// Free frees a Service object if no longer needed
+// llgo:link (*Service).Free C.hyper_service_free
+func (s *Service) Free() {
+}
+
+// ServeHttp1Connection serves the provided Service as an HTTP/1 endpoint over the provided IO
+// llgo:link ServeHttp1Connection C.hyper_serve_http1_connection
+func ServeHttp1Connection(serverconnOptions *Http1ServerconnOptions, io *Io, service *Service) *Task {
+	return nil
+}
+
+// ServeHttp2Connection serves the provided Service as an HTTP/2 endpoint over the provided IO
+// llgo:link ServeHttp2Connection C.hyper_serve_http2_connection
+func ServeHttp2Connection(serverconnOptions *Http2ServerconnOptions, io *Io, service *Service) *Task {
+	return nil
+}
+
+// ServeHttpXConnection serves the provided Service as either an HTTP/1 or HTTP/2 (depending on what the client supports) endpoint over the provided IO
+// llgo:link ServeHttpXConnection C.hyper_serve_httpX_connection
+func ServeHttpXConnection(http1ServerconnOptions *Http1ServerconnOptions, http2ServerconnOptions *Http2ServerconnOptions, io *Io, service *Service) *Task {
+	return nil
+}
+
+// Send sends a Response back to the client. This function consumes the response and the channel.
+// llgo:link (*ResponseChannel).Send C.hyper_response_channel_send
+func (rc *ResponseChannel) Send(response *Response) {
+}
