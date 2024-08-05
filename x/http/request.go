@@ -1,8 +1,9 @@
-package httpget
+package http
 
 import (
 	"fmt"
 	"io"
+	"net/url"
 
 	"github.com/goplus/llgo/c"
 	"github.com/goplus/llgoexamples/rust/hyper"
@@ -10,19 +11,29 @@ import (
 
 type Request struct {
 	Method string
-	Url    string
+	URL    *url.URL
+	Req    *hyper.Request
 }
 
-func NewRequest(method, url string, body io.Reader) (*Request, error) {
+func NewRequest(method, urlStr string, body io.Reader) (*Request, error) {
+	parseURL, err := url.Parse(urlStr)
+	if err != nil {
+		return nil, err
+	}
+	req, err := NewHyperRequest(method, parseURL)
+	if err != nil {
+		return nil, err
+	}
 	return &Request{
 		Method: method,
-		Url:    url,
+		URL:    parseURL,
+		Req:    req,
 	}, nil
 }
 
-func NewHyperRequest(request *Request) (*hyper.Request, error) {
-	host, _, uri := parseURL(request.Url)
-	method := request.Method
+func NewHyperRequest(method string, URL *url.URL) (*hyper.Request, error) {
+	host := URL.Hostname()
+	uri := URL.RequestURI()
 	// Prepare the request
 	req := hyper.NewRequest()
 	// Set the request method and uri

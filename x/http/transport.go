@@ -1,11 +1,9 @@
-package httpget
+package http
 
 import (
-	"bufio"
 	"fmt"
 	io2 "io"
 	"strconv"
-	"strings"
 	"unsafe"
 
 	"github.com/goplus/llgo/c"
@@ -27,6 +25,16 @@ type ConnData struct {
 type Transport struct {
 }
 
+// TaskId The unique identifier of the next task polled from the executor
+type TaskId c.Int
+
+const (
+	NotSet TaskId = iota
+	Send
+	ReceiveResp
+	ReceiveRespBody
+)
+
 var DefaultTransport RoundTripper = &Transport{}
 
 // persistConn wraps a connection, usually a persistent one
@@ -35,16 +43,15 @@ type persistConn struct {
 	// alt optionally specifies the TLS NextProto RoundTripper.
 	// This is used for HTTP/2 today and future protocols later.
 	// If it's non-nil, the rest of the fields are unused.
-	alt RoundTripper
-
-	conn    *ConnData
-	t       *Transport
-	br      *bufio.Reader       // from conn
-	bw      *bufio.Writer       // to conn
-	nwrite  int64               // bytes written
-	reqch   chan requestAndChan // written by roundTrip; read by readLoop
-	writech chan writeRequest   // written by roundTrip; read by writeLoop
-	closech chan struct{}       // closed when conn closed
+	//alt  RoundTripper
+	//br      *bufio.Reader       // from conn
+	//bw      *bufio.Writer       // to conn
+	//nwrite  int64               // bytes written
+	//writech chan writeRequest   // written by roundTrip; read by writeLoop
+	//closech chan struct{}       // closed when conn closed
+	conn  *ConnData
+	t     *Transport
+	reqch chan requestAndChan // written by roundTrip; read by readLoop
 }
 
 // incomparable is a zero-width, non-comparable type. Adding it to a struct
@@ -58,20 +65,6 @@ type requestAndChan struct {
 	ch  chan responseAndError // unbuffered; always send in select on callerGone
 }
 
-// A writeRequest is sent by the caller's goroutine to the
-// writeLoop's goroutine to write a request while the read loop
-// concurrently waits on both the write response and the server's
-// reply.
-type writeRequest struct {
-	// req *transportRequest
-	ch chan<- error
-
-	// Optional blocking chan for Expect: 100-continue (for receive).
-	// If not nil, writeLoop blocks sending request body until
-	// it receives from this chan.
-	continueCh <-chan struct{}
-}
-
 // responseAndError is how the goroutine reading from an HTTP/1 server
 // communicates with the goroutine doing the RoundTrip.
 type responseAndError struct {
@@ -80,23 +73,26 @@ type responseAndError struct {
 	err error
 }
 
-func (t *Transport) RoundTrip(request *Request) (*Response, error) {
-	req, err := NewHyperRequest(request)
+func (t *Transport) RoundTrip(req *Request) (*Response, error) {
+	pconn, err := t.getConn(req)
 	if err != nil {
 		return nil, err
 	}
-	pconn, err := t.getConn(req)
 	var resp *Response
 	resp, err = pconn.roundTrip(req)
-	if err == nil {
-		return resp, nil
+	if err != nil {
+		return nil, err
 	}
-	return nil, err
+	return resp, nil
 }
 
-func (t *Transport) getConn(req *hyper.Request) (pconn *persistConn, err error) {
-	host := "www.baidu.com"
-	port := "80"
+func (t *Transport) getConn(req *Request) (pconn *persistConn, err error) {
+	host := req.URL.Hostname()
+	port := req.URL.Port()
+	if port == "" {
+		// Hyper only supports http
+		port = "80"
+	}
 	loop := libuv.DefaultLoop()
 	conn := (*ConnData)(c.Malloc(unsafe.Sizeof(ConnData{})))
 	if conn == nil {
@@ -125,23 +121,23 @@ func (t *Transport) getConn(req *hyper.Request) (pconn *persistConn, err error) 
 		return nil, fmt.Errorf("connect error: %s\n", c.GoString(libuv.Strerror(libuv.Errno(status))))
 	}
 	pconn = &persistConn{
-		conn:    conn,
-		t:       t,
-		reqch:   make(chan requestAndChan, 1),
-		writech: make(chan writeRequest, 1),
-		closech: make(chan struct{}),
+		conn:  conn,
+		t:     t,
+		reqch: make(chan requestAndChan, 1),
+		//writech: make(chan writeRequest, 1),
+		//closech: make(chan struct{}),
 	}
 
 	net.Freeaddrinfo(res)
 
-	go pconn.startLoop(loop)
+	go pconn.readWriteLoop(loop)
 	return pconn, nil
 }
 
-func (pc *persistConn) roundTrip(req *hyper.Request) (resp *Response, err error) {
+func (pc *persistConn) roundTrip(req *Request) (resp *Response, err error) {
 	resc := make(chan responseAndError)
 	pc.reqch <- requestAndChan{
-		req: req,
+		req: req.Req,
 		ch:  resc,
 	}
 
@@ -157,7 +153,7 @@ func (pc *persistConn) roundTrip(req *hyper.Request) (resp *Response, err error)
 	}
 }
 
-func (pc *persistConn) startLoop(loop *libuv.Loop) {
+func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 	// Hookup the IO
 	io := NewIoWithConnReadWrite(pc.conn)
 
@@ -169,150 +165,140 @@ func (pc *persistConn) startLoop(loop *libuv.Loop) {
 	opts.Exec(exec)
 
 	handshakeTask := hyper.Handshake(io, opts)
-	SetUserData(handshakeTask, hyper.ExampleHandshake)
+	SetTaskId(handshakeTask, Send)
 
 	// Let's wait for the handshake to finish...
 	exec.Push(handshakeTask)
 
+	// The polling state machine!
+	//for {
+	// Poll all ready tasks and act on them...
+	rc := <-pc.reqch // blocking
+	alive := true
 	var hyperErr *hyper.Error
 	var response Response
-
-	var rc requestAndChan
-
-	select {
-	case rc = <-pc.reqch:
-	}
-	// The polling state machine!
-	for {
-		// Poll all ready tasks and act on them...
-		for {
-			task := exec.Poll()
-			if task == nil {
-				break
-			}
-
-			switch (hyper.ExampleId)(uintptr(task.Userdata())) {
-			case hyper.ExampleHandshake:
-				if task.Type() == hyper.TaskError {
-					c.Printf(c.Str("handshake error!\n"))
-					hyperErr = (*hyper.Error)(task.Value())
-					Fail(hyperErr)
-				}
-				if task.Type() != hyper.TaskClientConn {
-					c.Printf(c.Str("unexpected task type\n"))
-					Fail(hyperErr)
-				}
-
-				client := (*hyper.ClientConn)(task.Value())
-				task.Free()
-
-				// Send it!
-				sendTask := client.Send(rc.req)
-				SetUserData(sendTask, hyper.ExampleSend)
-				sendRes := exec.Push(sendTask)
-				if sendRes != hyper.OK {
-					panic("error send\n")
-				}
-
-				// For this example, no longer need the client
-				client.Free()
-
-				break
-			case hyper.ExampleSend:
-				if task.Type() == hyper.TaskError {
-					c.Printf(c.Str("send error!\n"))
-					hyperErr = (*hyper.Error)(task.Value())
-					Fail(hyperErr)
-				}
-				if task.Type() != hyper.TaskResponse {
-					c.Printf(c.Str("unexpected task type\n"))
-					Fail(hyperErr)
-				}
-
-				// Take the results
-				resp := (*hyper.Response)(task.Value())
-				task.Free()
-
-				rp := resp.ReasonPhrase()
-				rpLen := resp.ReasonPhraseLen()
-
-				response.Status = strconv.Itoa(int(resp.Status())) + " " + string((*[1 << 30]byte)(c.Pointer(rp))[:rpLen:rpLen])
-				response.StatusCode = int(resp.Status())
-
-				headers := resp.Headers()
-				headers.Foreach(AppendToResponseHeader, c.Pointer(&response))
-				respBody := resp.Body()
-
-				response.Body, response.respBodyWriter = io2.Pipe()
-
-				/*go func() {
-					fmt.Println("writing...")
-					for {
-						fmt.Println("writing for...")
-						dataTask := respBody.Data()
-						exec.Push(dataTask)
-						dataTask = exec.Poll()
-						if dataTask.Type() == hyper.TaskBuf {
-							buf := (*hyper.Buf)(dataTask.Value())
-							len := buf.Len()
-							bytes := unsafe.Slice((*byte)(buf.Bytes()), len)
-							_, err := response.respBodyWriter.Write(bytes)
-							if err != nil {
-								fmt.Printf("Failed to write response body: %v\n", err)
-								break
-							}
-							dataTask.Free()
-						} else if dataTask.Type() == hyper.TaskEmpty {
-							fmt.Println("writing empty")
-							dataTask.Free()
-							break
-						}
-					}
-					fmt.Println("end writing")
-					defer response.respBodyWriter.Close()
-				}()*/
-
-				foreachTask := respBody.Foreach(AppendToResponseBody, c.Pointer(&response))
-
-				SetUserData(foreachTask, hyper.ExampleRespBody)
-				exec.Push(foreachTask)
-
-				rc.ch <- responseAndError{res: &response}
-				// No longer need the response
-				//resp.Free()
-
-				break
-			case hyper.ExampleRespBody:
-				println("ExampleRespBody")
-				if task.Type() == hyper.TaskError {
-					c.Printf(c.Str("body error!\n"))
-					hyperErr = (*hyper.Error)(task.Value())
-					Fail(hyperErr)
-				}
-				if task.Type() != hyper.TaskEmpty {
-					c.Printf(c.Str("unexpected task type\n"))
-					Fail(hyperErr)
-				}
-
-				// Cleaning up before exiting
-				task.Free()
-				//exec.Free()
-				(*libuv.Handle)(c.Pointer(&pc.conn.TcpHandle)).Close(nil)
-
-				FreeConnData(pc.conn)
-
-				//return &response, nil
-				break
-			case hyper.ExampleNotSet:
-				println("ExampleNotSet")
-				// A background task for hyper_client completed...
-				task.Free()
-				break
-			}
+	var respBody *hyper.Body = nil
+	for alive {
+		task := exec.Poll()
+		if task == nil {
+			//break
+			libuv.Run(loop, libuv.RUN_ONCE)
+			continue
 		}
 
-		libuv.Run(loop, libuv.RUN_ONCE)
+		switch (TaskId)(uintptr(task.Userdata())) {
+		case Send:
+			if task.Type() == hyper.TaskError {
+				c.Printf(c.Str("handshake error!\n"))
+				hyperErr = (*hyper.Error)(task.Value())
+				Fail(hyperErr)
+			}
+			if task.Type() != hyper.TaskClientConn {
+				c.Printf(c.Str("unexpected task type\n"))
+				Fail(hyperErr)
+			}
+
+			client := (*hyper.ClientConn)(task.Value())
+			task.Free()
+
+			// Send it!
+			sendTask := client.Send(rc.req)
+			SetTaskId(sendTask, ReceiveResp)
+			sendRes := exec.Push(sendTask)
+			if sendRes != hyper.OK {
+				panic("error send\n")
+			}
+
+			// For this example, no longer need the client
+			client.Free()
+
+		case ReceiveResp:
+			if task.Type() == hyper.TaskError {
+				c.Printf(c.Str("send error!\n"))
+				hyperErr = (*hyper.Error)(task.Value())
+				Fail(hyperErr)
+			}
+			if task.Type() != hyper.TaskResponse {
+				c.Printf(c.Str("unexpected task type\n"))
+				Fail(hyperErr)
+			}
+
+			// Take the results
+			resp := (*hyper.Response)(task.Value())
+			task.Free()
+
+			rp := resp.ReasonPhrase()
+			rpLen := resp.ReasonPhraseLen()
+
+			response.Status = strconv.Itoa(int(resp.Status())) + " " + string((*[1 << 30]byte)(c.Pointer(rp))[:rpLen:rpLen])
+			response.StatusCode = int(resp.Status())
+
+			headers := resp.Headers()
+			headers.Foreach(AppendToResponseHeader, c.Pointer(&response))
+			//respBody := resp.Body()
+			respBody = resp.Body()
+
+			response.Body, response.respBodyWriter = io2.Pipe()
+
+			//foreachTask := respBody.Foreach(AppendToResponseBody, c.Pointer(&response))
+			//SetTaskId(foreachTask, ReceiveRespBody)
+			//exec.Push(foreachTask)
+
+			rc.ch <- responseAndError{res: &response}
+
+			dataTask := respBody.Data()
+			SetTaskId(dataTask, ReceiveRespBody)
+			exec.Push(dataTask)
+
+			// No longer need the response
+			resp.Free()
+
+		case ReceiveRespBody:
+			if task.Type() == hyper.TaskError {
+				c.Printf(c.Str("body error!\n"))
+				hyperErr = (*hyper.Error)(task.Value())
+				Fail(hyperErr)
+			}
+			if task.Type() == hyper.TaskBuf {
+				buf := (*hyper.Buf)(task.Value())
+				bufLen := buf.Len()
+				bytes := unsafe.Slice((*byte)(buf.Bytes()), bufLen)
+				_, err := response.respBodyWriter.Write(bytes) // blocking
+				if err != nil {
+					panic("[readWriteLoop(): case ReceiveRespBody] error write\n")
+				}
+				buf.Free()
+				task.Free()
+
+				dataTask := respBody.Data()
+				SetTaskId(dataTask, ReceiveRespBody)
+				exec.Push(dataTask)
+
+				break
+			}
+			// task.Type() == hyper.TaskEmpty
+			if task.Type() != hyper.TaskEmpty {
+				c.Printf(c.Str("unexpected task type\n"))
+				Fail(hyperErr)
+			}
+			// Cleaning up before exiting
+			task.Free()
+			respBody.Free()
+			response.respBodyWriter.Close()
+			exec.Free()
+			(*libuv.Handle)(c.Pointer(&pc.conn.TcpHandle)).Close(nil)
+			FreeConnData(pc.conn)
+
+			close(rc.ch)
+			close(pc.reqch)
+
+			alive = false
+		case NotSet:
+			// A background task for hyper_client completed...
+			task.Free()
+		}
 	}
+	//}
 }
 
 // AllocBuffer allocates a buffer for reading from a socket
@@ -453,50 +439,8 @@ func NewIoWithConnReadWrite(connData *ConnData) *hyper.Io {
 	return io
 }
 
-// SetUserData Set the user data for the task
-func SetUserData(task *hyper.Task, userData hyper.ExampleId) {
+// SetTaskId Set TaskId to the task's userdata as a unique identifier
+func SetTaskId(task *hyper.Task, userData TaskId) {
 	var data = userData
 	task.SetUserdata(c.Pointer(uintptr(data)))
-}
-
-// parseURL Parse the URL and extract the host name, port number, and URI
-func parseURL(rawURL string) (hostname, port, uri string) {
-	// 找到 "://" 的位置，以分隔协议和主机名
-	schemeEnd := strings.Index(rawURL, "://")
-	if schemeEnd != -1 {
-		//scheme = rawURL[:schemeEnd]
-		rawURL = rawURL[schemeEnd+3:]
-	} else {
-		//scheme = "http" // 默认协议为 http
-	}
-
-	// 找到第一个 "/" 的位置，以分隔主机名和路径
-	pathStart := strings.Index(rawURL, "/")
-	if pathStart != -1 {
-		uri = rawURL[pathStart:]
-		rawURL = rawURL[:pathStart]
-	} else {
-		uri = "/"
-	}
-
-	// 找到 ":" 的位置，以分隔主机名和端口号
-	portStart := strings.LastIndex(rawURL, ":")
-	if portStart != -1 {
-		hostname = rawURL[:portStart]
-		port = rawURL[portStart+1:]
-	} else {
-		hostname = rawURL
-		port = "" // 未指定端口号
-	}
-
-	// 如果未指定端口号，根据协议设置默认端口号
-	if port == "" {
-		//if scheme == "https" {
-		//	port = "443"
-		//} else {
-		//	port = "80"
-		//}
-		port = "80"
-	}
-	return
 }

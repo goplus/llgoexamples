@@ -2,4 +2,4 @@ module github.com/goplus/llgoexamples
 
 go 1.20
 
-require github.com/goplus/llgo v0.9.5-0.20240731053840-36072584d0be
+require github.com/goplus/llgo v0.9.5-0.20240805045323-4bff9cc3df0c
