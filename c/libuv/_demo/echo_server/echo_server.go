@@ -13,7 +13,7 @@ var DEFAULT_PORT = 8080
 var DEFAULT_BACKLOG = 128
 
 var (
-	Req libuv.Write
+	Req *libuv.Write
 	Buf libuv.Buf
 )
 
@@ -22,8 +22,8 @@ func main() {
 	var loop = libuv.DefaultLoop()
 
 	// Initialize a TCP server
-	var server libuv.Tcp
-	libuv.InitTcp(loop, &server)
+	server := libuv.NewTcp()
+	libuv.InitTcp(loop, server)
 
 	// Set up the address to bind the server to
 	var addr net.SockaddrIn
@@ -31,8 +31,8 @@ func main() {
 	fmt.Printf("Listening on 0.0.0.0:%d\n", DEFAULT_PORT)
 
 	// Bind the server to the specified address and port
-	(&server).Bind((*net.SockAddr)(unsafe.Pointer(&addr)), 0)
-	res := (*libuv.Stream)(unsafe.Pointer(&server)).Listen(DEFAULT_BACKLOG, OnNewConnection)
+	server.Bind((*net.SockAddr)(unsafe.Pointer(&addr)), 0)
+	res := (*libuv.Stream)(unsafe.Pointer(server)).Listen(DEFAULT_BACKLOG, OnNewConnection)
 	if res != 0 {
 		fmt.Printf("Listen error: %s\n", libuv.Strerror(res))
 		return
@@ -43,14 +43,14 @@ func main() {
 }
 
 func FreeWriteReq() {
-	// Free the buffer base and the WriteReq itself.
-	c.Free(unsafe.Pointer(Buf.Base))
+	// Free the buffer base.
+	c.Free(unsafe.Pointer(Buf.Buf.Base))
 }
 
 func AllocBuffer(handle *libuv.Handle, suggestedSize uintptr, buf *libuv.Buf) {
 	// Allocate memory for the buffer based on the suggested size.
-	buf.Base = (*c.Char)(c.Malloc(suggestedSize))
-	buf.Len = suggestedSize
+	buf.Buf.Base = (*c.Char)(c.Malloc(suggestedSize))
+	buf.Buf.Len = suggestedSize
 }
 
 func EchoWrite(req *libuv.Write, status c.Int) {
@@ -63,8 +63,9 @@ func EchoWrite(req *libuv.Write, status c.Int) {
 func EchoRead(client *libuv.Stream, nread c.Long, buf *libuv.Buf) {
 	if nread > 0 {
 		// Initialize the buffer with the data read.
-		Buf = libuv.InitBuf(unsafe.Slice(buf.Base, int(nread)))
+		Buf = libuv.InitBuf2(buf.Base, c.Uint(nread))
 		// Write the data back to the client.
+		Req = libuv.NewWrite()
 		Req.Write(client, &Buf, 1, EchoWrite)
 		return
 	}
@@ -88,7 +89,7 @@ func OnNewConnection(server *libuv.Stream, status c.Int) {
 	}
 
 	// Allocate memory for a new client.
-	client := (*libuv.Tcp)(c.Malloc(unsafe.Sizeof(libuv.Tcp{})))
+	client := libuv.NewTcp()
 
 	if client == nil {
 		fmt.Printf("Failed to allocate memory for client\n")

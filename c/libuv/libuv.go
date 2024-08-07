@@ -70,11 +70,11 @@ const (
 
 type Loop struct {
 	*libuv.Loop
-	WalkCb WalkCb
+	WalkCb func(handle *Handle, arg c.Pointer)
 }
 
 type Poll struct {
-	*libuv.Poll
+	libuv.Poll
 	PollCb func(handle *Poll, status c.Int, events c.Int)
 }
 
@@ -86,13 +86,13 @@ type WalkCb func(handle *Handle, arg c.Pointer)
 
 type PollCb func(handle *Poll, status c.Int, events c.Int)
 
-type MallocFunc func(size uintptr) c.Pointer
+type MallocFunc = libuv.MallocFunc
 
-type ReallocFunc func(ptr c.Pointer, size uintptr) c.Pointer
+type ReallocFunc = libuv.ReallocFunc
 
-type CallocFunc func(count uintptr, size uintptr) c.Pointer
+type CallocFunc = libuv.CallocFunc
 
-type FreeFunc func(ptr c.Pointer)
+type FreeFunc = libuv.FreeFunc
 
 // ----------------------------------------------
 
@@ -112,10 +112,9 @@ func LibraryShutdown() {
 }
 
 // ReplaceAllocator replaces the allocator.
-// TODO
-//func ReplaceAllocator(mallocFunc libuv.MallocFunc, reallocFunc libuv.ReallocFunc, callocFunc libuv.CallocFunc, freeFunc libuv.FreeFunc) {
-//	libuv.ReplaceAllocator(mallocFunc, reallocFunc, callocFunc, freeFunc)
-//}
+func ReplaceAllocator(mallocFunc MallocFunc, reallocFunc ReallocFunc, callocFunc CallocFunc, freeFunc FreeFunc) {
+	libuv.ReplaceAllocator(mallocFunc, reallocFunc, callocFunc, freeFunc)
+}
 
 // ----------------------------------------------
 
@@ -140,8 +139,8 @@ func (l *Loop) Run(mode libuv.RunMode) int {
 }
 
 // Stop closes the loop.
-func (l *Loop) Stop() {
-	l.Loop.Stop()
+func (l *Loop) Stop() int {
+	return int(l.Loop.Close())
 }
 
 // Default creates a new loop.
@@ -219,19 +218,24 @@ func InitBuf(buffer []c.Char) Buf {
 	return Buf{Buf: &buf}
 }
 
+func InitBuf2(base *c.Char, len c.Uint) Buf {
+	buf := libuv.InitBuf(base, len)
+	return Buf{Buf: &buf}
+}
+
 // ----------------------------------------------
 
 /* Poll related function and method */
 
 // PollInit initializes the poll.
 func PollInit(loop *Loop, poll *Poll, fd libuv.OsFd) int {
-	return int(libuv.PollInit(loop.Loop, poll.Poll, fd))
+	return int(libuv.PollInit(loop.Loop, &poll.Poll, fd))
 }
 
 // PollStart starts the poll.
 func PollStart(poll *Poll, events int, cb PollCb) int {
 	poll.PollCb = cb
-	return int(libuv.PollStart(poll.Poll, c.Int(events), func(_handle *libuv.Poll, status c.Int, events c.Int) {
+	return int((&poll.Poll).Start(c.Int(events), func(_handle *libuv.Poll, status c.Int, events c.Int) {
 		handle := (*Poll)(unsafe.Pointer(_handle))
 		handle.PollCb(handle, status, events)
 	}))
@@ -239,10 +243,10 @@ func PollStart(poll *Poll, events int, cb PollCb) int {
 
 // PollStop stops the poll.
 func PollStop(poll *Poll) int {
-	return int(libuv.PollStop(poll.Poll))
+	return int((&poll.Poll).Stop())
 }
 
 // PollInitSocket initializes the poll with the given socket.
 func PollInitSocket(loop *Loop, poll *Poll, socket int) int {
-	return int(libuv.PollInitSocket(loop.Loop, poll.Poll, c.Int(socket)))
+	return int(libuv.PollInitSocket(loop.Loop, &poll.Poll, c.Int(socket)))
 }
