@@ -7,7 +7,7 @@ import (
 
 type Signal struct {
 	libuv.Signal
-	SignalCb func(handle *Signal, sigNum c.Int)
+	SignalCb SignalCb
 }
 
 // ----------------------------------------------

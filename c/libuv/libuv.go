@@ -70,12 +70,12 @@ const (
 
 type Loop struct {
 	*libuv.Loop
-	WalkCb func(handle *Handle, arg c.Pointer)
+	WalkCb WalkCb
 }
 
 type Poll struct {
 	libuv.Poll
-	PollCb func(handle *Poll, status c.Int, events c.Int)
+	PollCb PollCb
 }
 
 type Buf struct {
@@ -218,7 +218,8 @@ func InitBuf(buffer []c.Char) Buf {
 	return Buf{Buf: &buf}
 }
 
-func InitBuf2(base *c.Char, len c.Uint) Buf {
+// InitBufRaw initializes a buffer with the given c.Char slice and length.
+func InitBufRaw(base *c.Char, len c.Uint) Buf {
 	buf := libuv.InitBuf(base, len)
 	return Buf{Buf: &buf}
 }

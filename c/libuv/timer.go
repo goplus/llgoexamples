@@ -7,7 +7,7 @@ import (
 
 type Timer struct {
 	*libuv.Timer
-	TimerCb func(timer *Timer)
+	TimerCb TimerCb
 }
 
 // ----------------------------------------------

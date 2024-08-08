@@ -63,7 +63,7 @@ func EchoWrite(req *libuv.Write, status c.Int) {
 func EchoRead(client *libuv.Stream, nread c.Long, buf *libuv.Buf) {
 	if nread > 0 {
 		// Initialize the buffer with the data read.
-		Buf = libuv.InitBuf2(buf.Base, c.Uint(nread))
+		Buf = libuv.InitBufRaw(buf.Base, c.Uint(nread))
 		// Write the data back to the client.
 		Req = libuv.NewWrite()
 		Req.Write(client, &Buf, 1, EchoWrite)

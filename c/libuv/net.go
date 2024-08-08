@@ -10,69 +10,69 @@ import (
 
 type Handle struct {
 	libuv.Handle
-	ConnectionCb func(server *Stream, status c.Int)
-	ReadCb       func(stream *Stream, nread c.Long, buf *Buf)
-	AllocCb      func(handle *Handle, suggestedSize uintptr, buf *Buf)
-	CloseCb      func(handle *Handle)
-	UdpRecvCb    func(handle *Udp, nread c.Long, buf *Buf, addr *net.SockAddr, flags c.Uint)
+	ConnectionCb ConnectionCb
+	ReadCb       ReadCb
+	AllocCb      AllocCb
+	CloseCb      CloseCb
+	UdpRecvCb    UdpRecvCb
 }
 
 type Stream struct {
 	libuv.Stream
-	ConnectionCb func(server *Stream, status c.Int)
-	ReadCb       func(stream *Stream, nread c.Long, buf *Buf)
-	AllocCb      func(handle *Handle, suggestedSize uintptr, buf *Buf)
-	CloseCb      func(handle *Handle)
+	ConnectionCb ConnectionCb
+	ReadCb       ReadCb
+	AllocCb      AllocCb
+	CloseCb      CloseCb
 }
 
 type Req struct {
 	libuv.Req
-	ConnectCb func(req *Connect, status c.Int)
-	WriteCb   func(req *Write, status c.Int)
+	ConnectCb ConnectCb
+	WriteCb   WriteCb
 }
 
 type Write struct {
 	_Write    libuv.Write
-	ConnectCb func(req *Connect, status c.Int)
-	WriteCb   func(req *Write, status c.Int)
+	ConnectCb ConnectCb
+	WriteCb   WriteCb
 }
 
 type Connect struct {
 	libuv.Connect
-	ConnectCb func(req *Connect, status c.Int)
-	WriteCb   func(req *Write, status c.Int)
+	ConnectCb ConnectCb
+	WriteCb   WriteCb
 }
 
 type Tcp struct {
 	libuv.Tcp
-	ConnectionCb func(server *Stream, status c.Int)
-	ReadCb       func(stream *Stream, nread c.Long, buf *Buf)
-	AllocCb      func(handle *Handle, suggestedSize uintptr, buf *Buf)
-	CloseCb      func(handle *Handle)
+	ConnectionCb ConnectionCb
+	ReadCb       ReadCb
+	AllocCb      AllocCb
+	CloseCb      CloseCb
 }
 
 type Udp struct {
 	libuv.Udp
-	ConnectionCb func(server *Stream, status c.Int)
-	ReadCb       func(stream *Stream, nread c.Long, buf *Buf)
-	AllocCb      func(handle *Handle, suggestedSize uintptr, buf *Buf)
-	CloseCb      func(handle *Handle)
-	UdpRecvCb    func(handle *Udp, nread c.Long, buf *Buf, addr *net.SockAddr, flags c.Uint)
+	ConnectionCb ConnectionCb
+	ReadCb       ReadCb
+	AllocCb      AllocCb
+	CloseCb      CloseCb
+	UdpRecvCb    UdpRecvCb
 }
 
 type UdpSend struct {
 	libuv.UdpSend
-	UdpSendCb func(req *UdpSend, status c.Int)
+	UdpSendCb UdpSendCb
 }
 
 type GetAddrInfo struct {
 	libuv.GetAddrInfo
-	GetaddrinfoCb func(req *GetAddrInfo, status c.Int, res *net.AddrInfo)
+	GetaddrinfoCb GetaddrinfoCb
 }
 
 type GetNameInfo struct {
 	libuv.GetNameInfo
-	GetnameinfoCb func(req *GetNameInfo, status c.Int, hostname *c.Char, service *c.Char)
+	GetnameinfoCb GetnameinfoCb
 }
 
 type Membership struct {
@@ -81,7 +81,7 @@ type Membership struct {
 
 type Shutdown struct {
 	libuv.Shutdown
-	ShutdownCb func(req *Shutdown, status c.Int)
+	ShutdownCb ShutdownCb
 }
 
 // ----------------------------------------------

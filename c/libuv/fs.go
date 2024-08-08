@@ -61,17 +61,17 @@ const (
 
 type Fs struct {
 	libuv.Fs
-	FsCb func(req *Fs)
+	FsCb FsCb
 }
 
 type FsEvent struct {
 	*libuv.FsEvent
-	FsEventCb func(handle *FsEvent, filename *c.Char, events c.Int, status c.Int)
+	FsEventCb FsEventCb
 }
 
 type FsPoll struct {
 	*libuv.FsPoll
-	FsPollCb func(handle *FsPoll, status c.Int, events c.Int)
+	FsPollCb FsPollCb
 }
 
 type Dirent struct {
