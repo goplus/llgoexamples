@@ -13,7 +13,7 @@ func main() {
 		fmt.Println(err)
 		return
 	}
-	println(resp.Status)
+	fmt.Println(resp.Status, "read bytes: ", resp.ContentLength)
 	resp.PrintHeaders()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

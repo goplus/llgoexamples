@@ -4,15 +4,19 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"time"
 
 	"github.com/goplus/llgo/c"
 	"github.com/goplus/llgoexamples/rust/hyper"
 )
 
 type Request struct {
-	Method string
-	URL    *url.URL
-	Req    *hyper.Request
+	Method  string
+	URL     *url.URL
+	Req     *hyper.Request
+	Host    string
+	Header  Header
+	Timeout time.Duration
 }
 
 func NewRequest(method, urlStr string, body io.Reader) (*Request, error) {
@@ -20,7 +24,7 @@ func NewRequest(method, urlStr string, body io.Reader) (*Request, error) {
 	if err != nil {
 		return nil, err
 	}
-	req, err := NewHyperRequest(method, parseURL)
+	req, err := newHyperRequest(method, parseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -28,10 +32,11 @@ func NewRequest(method, urlStr string, body io.Reader) (*Request, error) {
 		Method: method,
 		URL:    parseURL,
 		Req:    req,
+		Host:   parseURL.Hostname(),
 	}, nil
 }
 
-func NewHyperRequest(method string, URL *url.URL) (*hyper.Request, error) {
+func newHyperRequest(method string, URL *url.URL) (*hyper.Request, error) {
 	host := URL.Hostname()
 	uri := URL.RequestURI()
 	// Prepare the request
