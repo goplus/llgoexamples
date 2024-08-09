@@ -17,6 +17,8 @@ type ConnData struct {
 	TcpHandle     libuv.Tcp
 	ConnectReq    libuv.Connect
 	ReadBuf       libuv.Buf
+	TimeoutTimer  libuv.Timer
+	IsCompleted   int
 	ReadBufFilled uintptr
 	ReadWaker     *hyper.Waker
 	WriteWaker    *hyper.Waker
@@ -53,9 +55,11 @@ type persistConn struct {
 	//nwrite  int64               // bytes written
 	//writech chan writeRequest   // written by roundTrip; read by writeLoop
 	//closech chan struct{}       // closed when conn closed
-	conn  *ConnData
-	t     *Transport
-	reqch chan requestAndChan // written by roundTrip; read by readLoop
+	conn      *ConnData
+	t         *Transport
+	reqch     chan requestAndChan // written by roundTrip; read by readLoop
+	cancelch  chan freeChan
+	timeoutch chan struct{}
 }
 
 // incomparable is a zero-width, non-comparable type. Adding it to a struct
@@ -65,7 +69,7 @@ type incomparable [0]func()
 
 type requestAndChan struct {
 	_   incomparable
-	req *hyper.Request
+	req *Request
 	ch  chan responseAndError // unbuffered; always send in select on callerGone
 }
 
@@ -75,6 +79,17 @@ type responseAndError struct {
 	_   incomparable
 	res *Response // else use this response (see res method)
 	err error
+}
+
+type connAndTimeoutChan struct {
+	_         incomparable
+	conn      *ConnData
+	timeoutch chan struct{}
+}
+
+type freeChan struct {
+	_      incomparable
+	freech chan struct{}
 }
 
 func (t *Transport) RoundTrip(req *Request) (*Response, error) {
@@ -104,6 +119,18 @@ func (t *Transport) getConn(req *Request) (pconn *persistConn, err error) {
 		return nil, fmt.Errorf("Failed to allocate memory for conn_data\n")
 	}
 
+	// If timeout is set, start the timer
+	timeoutch := make(chan struct{}, 1)
+	if req.timeout != 0 {
+		libuv.InitTimer(loop, &conn.TimeoutTimer)
+		ct := &connAndTimeoutChan{
+			conn:      conn,
+			timeoutch: timeoutch,
+		}
+		(*libuv.Handle)(c.Pointer(&conn.TimeoutTimer)).SetData(c.Pointer(ct))
+		conn.TimeoutTimer.Start(OnTimeout, uint64(req.timeout.Milliseconds()), 0)
+	}
+
 	libuv.InitTcp(loop, &conn.TcpHandle)
 	//conn.TcpHandle.Data = c.Pointer(conn)
 	(*libuv.Handle)(c.Pointer(&conn.TcpHandle)).SetData(c.Pointer(conn))
@@ -116,6 +143,7 @@ func (t *Transport) getConn(req *Request) (pconn *persistConn, err error) {
 	var res *net.AddrInfo
 	status := net.Getaddrinfo(c.AllocaCStr(host), c.AllocaCStr(port), &hints, &res)
 	if status != 0 {
+		close(timeoutch)
 		return nil, fmt.Errorf("getaddrinfo error\n")
 	}
 
@@ -123,38 +151,57 @@ func (t *Transport) getConn(req *Request) (pconn *persistConn, err error) {
 	(*libuv.Req)(c.Pointer(&conn.ConnectReq)).SetData(c.Pointer(conn))
 	status = libuv.TcpConnect(&conn.ConnectReq, &conn.TcpHandle, res.Addr, OnConnect)
 	if status != 0 {
+		close(timeoutch)
 		return nil, fmt.Errorf("connect error: %s\n", c.GoString(libuv.Strerror(libuv.Errno(status))))
 	}
 	pconn = &persistConn{
-		conn:  conn,
-		t:     t,
-		reqch: make(chan requestAndChan, 1),
+		conn:      conn,
+		t:         t,
+		reqch:     make(chan requestAndChan, 1),
+		cancelch:  make(chan freeChan, 1),
+		timeoutch: timeoutch,
 		//writech: make(chan writeRequest, 1),
 		//closech: make(chan struct{}),
 	}
 
 	net.Freeaddrinfo(res)
 
-	go pconn.readWriteLoop(loop)
+	if pconn.conn.IsCompleted != 1 {
+		go pconn.readWriteLoop(loop)
+	}
 	return pconn, nil
 }
 
-func (pc *persistConn) roundTrip(req *Request) (resp *Response, err error) {
-	resc := make(chan responseAndError)
+func (pc *persistConn) roundTrip(req *Request) (*Response, error) {
+	resc := make(chan responseAndError, 1)
+
 	pc.reqch <- requestAndChan{
-		req: req.Req,
+		req: req,
 		ch:  resc,
 	}
-
+	// Determine whether timeout has occurred
+	if pc.conn.IsCompleted == 1 {
+		rc := <-pc.reqch // blocking
+		// Free the resources
+		FreeResources(nil, nil, nil, nil, pc, rc)
+	}
 	select {
 	case re := <-resc:
 		if (re.res == nil) == (re.err == nil) {
 			return nil, fmt.Errorf("internal error: exactly one of res or err should be set; nil=%v", re.res == nil)
 		}
 		if re.err != nil {
-			return nil, err
+			return nil, re.err
 		}
 		return re.res, nil
+	case <-pc.timeoutch:
+		freech := make(chan struct{}, 1)
+		pc.cancelch <- freeChan{
+			freech: freech,
+		}
+		<-freech
+		close(freech)
+		return nil, fmt.Errorf("request timeout\n")
 	}
 }
 
@@ -185,140 +232,156 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 	var bodyWriter *io.PipeWriter
 	var respBody *hyper.Body = nil
 	for alive {
-		task := exec.Poll()
-		if task == nil {
-			//break
-			loop.Run(libuv.RUN_ONCE)
-			continue
-		}
-
-		switch (TaskId)(uintptr(task.Userdata())) {
-		case Send:
-			err := CheckTaskType(task, Send)
-			if err != nil {
-				rc.ch <- responseAndError{err: err}
-				// Free the resources
-				FreeResources(task, respBody, bodyWriter, exec, pc, rc)
-				return
+		select {
+		case fc := <-pc.cancelch:
+			// Free the resources
+			FreeResources(nil, respBody, bodyWriter, exec, pc, rc)
+			alive = false
+			fc.freech <- struct{}{}
+			return
+		default:
+			task := exec.Poll()
+			if task == nil {
+				//break
+				loop.Run(libuv.RUN_ONCE)
+				continue
 			}
-
-			client := (*hyper.ClientConn)(task.Value())
-			task.Free()
-
-			// Send it!
-			sendTask := client.Send(rc.req)
-			SetTaskId(sendTask, ReceiveResp)
-			sendRes := exec.Push(sendTask)
-			if sendRes != hyper.OK {
-				rc.ch <- responseAndError{err: fmt.Errorf("failed to send request")}
-				// Free the resources
-				FreeResources(task, respBody, bodyWriter, exec, pc, rc)
-				return
-			}
-
-			// For this example, no longer need the client
-			client.Free()
-		case ReceiveResp:
-			err := CheckTaskType(task, ReceiveResp)
-			if err != nil {
-				rc.ch <- responseAndError{err: err}
-				// Free the resources
-				FreeResources(task, respBody, bodyWriter, exec, pc, rc)
-				return
-			}
-
-			// Take the results
-			resp := (*hyper.Response)(task.Value())
-			task.Free()
-
-			rp := resp.ReasonPhrase()
-			rpLen := resp.ReasonPhraseLen()
-
-			response.Status = strconv.Itoa(int(resp.Status())) + " " + string((*[1 << 30]byte)(c.Pointer(rp))[:rpLen:rpLen])
-			response.StatusCode = int(resp.Status())
-
-			headers := resp.Headers()
-			headers.Foreach(AppendToResponseHeader, c.Pointer(&response))
-			respBody = resp.Body()
-
-			response.Body, bodyWriter = io.Pipe()
-
-			// TODO(spongehah) Replace header operations with using the textproto package
-			lengthSlice := response.Header["content-length"]
-			if lengthSlice == nil {
-				response.ContentLength = 0
-			} else {
-				contentLength := response.Header["content-length"][0]
-				length, err := strconv.Atoi(contentLength)
-				if err != nil {
-					rc.ch <- responseAndError{err: fmt.Errorf("failed to parse content-length")}
-					// Free the resources
-					FreeResources(task, respBody, bodyWriter, exec, pc, rc)
-					return
-				}
-				response.ContentLength = int64(length)
-			}
-
-			rc.ch <- responseAndError{res: &response}
-
-			dataTask := respBody.Data()
-			SetTaskId(dataTask, ReceiveRespBody)
-			exec.Push(dataTask)
-
-			// No longer need the response
-			resp.Free()
-		case ReceiveRespBody:
-			err := CheckTaskType(task, ReceiveRespBody)
-			if err != nil {
-				rc.ch <- responseAndError{err: err}
-				// Free the resources
-				FreeResources(task, respBody, bodyWriter, exec, pc, rc)
-				return
-			}
-
-			if task.Type() == hyper.TaskBuf {
-				buf := (*hyper.Buf)(task.Value())
-				bufLen := buf.Len()
-				bytes := unsafe.Slice((*byte)(buf.Bytes()), bufLen)
-				if bodyWriter == nil {
-					rc.ch <- responseAndError{err: fmt.Errorf("ResponseBodyWriter is nil")}
-					// Free the resources
-					FreeResources(task, respBody, bodyWriter, exec, pc, rc)
-					return
-				}
-				_, err := bodyWriter.Write(bytes) // blocking
+			switch (TaskId)(uintptr(task.Userdata())) {
+			case Send:
+				err := CheckTaskType(task, Send)
 				if err != nil {
 					rc.ch <- responseAndError{err: err}
 					// Free the resources
 					FreeResources(task, respBody, bodyWriter, exec, pc, rc)
 					return
 				}
-				buf.Free()
+
+				client := (*hyper.ClientConn)(task.Value())
 				task.Free()
+
+				// Send it!
+				sendTask := client.Send(rc.req.Req)
+				SetTaskId(sendTask, ReceiveResp)
+				sendRes := exec.Push(sendTask)
+				if sendRes != hyper.OK {
+					rc.ch <- responseAndError{err: fmt.Errorf("failed to send request")}
+					// Free the resources
+					FreeResources(task, respBody, bodyWriter, exec, pc, rc)
+					return
+				}
+
+				// For this example, no longer need the client
+				client.Free()
+			case ReceiveResp:
+				err := CheckTaskType(task, ReceiveResp)
+				if err != nil {
+					rc.ch <- responseAndError{err: err}
+					// Free the resources
+					FreeResources(task, respBody, bodyWriter, exec, pc, rc)
+					return
+				}
+
+				// Take the results
+				resp := (*hyper.Response)(task.Value())
+				task.Free()
+
+				rp := resp.ReasonPhrase()
+				rpLen := resp.ReasonPhraseLen()
+
+				response.Status = strconv.Itoa(int(resp.Status())) + " " + string((*[1 << 30]byte)(c.Pointer(rp))[:rpLen:rpLen])
+				response.StatusCode = int(resp.Status())
+
+				headers := resp.Headers()
+				headers.Foreach(AppendToResponseHeader, c.Pointer(&response))
+				respBody = resp.Body()
+
+				response.Body, bodyWriter = io.Pipe()
+
+				// TODO(spongehah) Replace header operations with using the textproto package
+				lengthSlice := response.Header["content-length"]
+				if lengthSlice == nil {
+					response.ContentLength = 0
+				} else {
+					contentLength := response.Header["content-length"][0]
+					length, err := strconv.Atoi(contentLength)
+					if err != nil {
+						rc.ch <- responseAndError{err: fmt.Errorf("failed to parse content-length")}
+						// Free the resources
+						FreeResources(task, respBody, bodyWriter, exec, pc, rc)
+						return
+					}
+					response.ContentLength = int64(length)
+				}
+
+				rc.ch <- responseAndError{res: &response}
+
+				// Response has been returned, stop the timer
+				pc.conn.IsCompleted = 1
+				// Stop the timer
+				if rc.req.timeout != 0 {
+					pc.conn.TimeoutTimer.Stop()
+					(*libuv.Handle)(c.Pointer(&pc.conn.TimeoutTimer)).Close(nil)
+				}
 
 				dataTask := respBody.Data()
 				SetTaskId(dataTask, ReceiveRespBody)
 				exec.Push(dataTask)
 
-				break
-			}
+				// No longer need the response
+				resp.Free()
+			case ReceiveRespBody:
+				err := CheckTaskType(task, ReceiveRespBody)
+				if err != nil {
+					rc.ch <- responseAndError{err: err}
+					// Free the resources
+					FreeResources(task, respBody, bodyWriter, exec, pc, rc)
+					return
+				}
 
-			// We are done with the response body
-			if task.Type() != hyper.TaskEmpty {
-				c.Printf(c.Str("unexpected task type\n"))
-				rc.ch <- responseAndError{err: fmt.Errorf("unexpected task type\n")}
+				if task.Type() == hyper.TaskBuf {
+					buf := (*hyper.Buf)(task.Value())
+					bufLen := buf.Len()
+					bytes := unsafe.Slice((*byte)(buf.Bytes()), bufLen)
+					if bodyWriter == nil {
+						rc.ch <- responseAndError{err: fmt.Errorf("ResponseBodyWriter is nil")}
+						// Free the resources
+						FreeResources(task, respBody, bodyWriter, exec, pc, rc)
+						return
+					}
+					_, err := bodyWriter.Write(bytes) // blocking
+					if err != nil {
+						rc.ch <- responseAndError{err: err}
+						// Free the resources
+						FreeResources(task, respBody, bodyWriter, exec, pc, rc)
+						return
+					}
+					buf.Free()
+					task.Free()
+
+					dataTask := respBody.Data()
+					SetTaskId(dataTask, ReceiveRespBody)
+					exec.Push(dataTask)
+
+					break
+				}
+
+				// We are done with the response body
+				if task.Type() != hyper.TaskEmpty {
+					c.Printf(c.Str("unexpected task type\n"))
+					rc.ch <- responseAndError{err: fmt.Errorf("unexpected task type\n")}
+					// Free the resources
+					FreeResources(task, respBody, bodyWriter, exec, pc, rc)
+					return
+				}
+
 				// Free the resources
 				FreeResources(task, respBody, bodyWriter, exec, pc, rc)
-				return
+
+				alive = false
+			case NotSet:
+				// A background task for hyper_client completed...
+				task.Free()
 			}
-
-			// Free the resources
-			FreeResources(task, respBody, bodyWriter, exec, pc, rc)
-
-			alive = false
-		case NotSet:
-			// A background task for hyper_client completed...
-			task.Free()
 		}
 	}
 	//}
@@ -454,6 +517,17 @@ func WriteCallBack(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen ui
 	return hyper.IoPending
 }
 
+// OnTimeout is the libuv callback for a timeout
+func OnTimeout(handle *libuv.Timer) {
+	ct := (*connAndTimeoutChan)((*libuv.Handle)(c.Pointer(handle)).GetData())
+	if ct.conn.IsCompleted != 1 {
+		ct.conn.IsCompleted = 1
+		ct.timeoutch <- struct{}{}
+	}
+	// Close the timer
+	(*libuv.Handle)(c.Pointer(&ct.conn.TimeoutTimer)).Close(nil)
+}
+
 // NewIoWithConnReadWrite creates a new IO with read and write callbacks
 func NewIoWithConnReadWrite(connData *ConnData) *hyper.Io {
 	hyperIo := hyper.NewIo()
@@ -537,9 +611,16 @@ func FreeResources(task *hyper.Task, respBody *hyper.Body, bodyWriter *io.PipeWr
 	(*libuv.Handle)(c.Pointer(&pc.conn.TcpHandle)).Close(nil)
 	FreeConnData(pc.conn)
 
+	CloseChannels(rc, pc)
+}
+
+// CloseChannels closes the channels
+func CloseChannels(rc requestAndChan, pc *persistConn) {
 	// Closing the channel
 	close(rc.ch)
 	close(pc.reqch)
+	close(pc.timeoutch)
+	close(pc.cancelch)
 }
 
 // FreeConnData frees the connection data

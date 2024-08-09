@@ -16,7 +16,7 @@ type Request struct {
 	Req     *hyper.Request
 	Host    string
 	Header  Header
-	Timeout time.Duration
+	timeout time.Duration
 }
 
 func NewRequest(method, urlStr string, body io.Reader) (*Request, error) {
@@ -29,10 +29,11 @@ func NewRequest(method, urlStr string, body io.Reader) (*Request, error) {
 		return nil, err
 	}
 	return &Request{
-		Method: method,
-		URL:    parseURL,
-		Req:    req,
-		Host:   parseURL.Hostname(),
+		Method:  method,
+		URL:     parseURL,
+		Req:     req,
+		Host:    parseURL.Hostname(),
+		timeout: 0,
 	}, nil
 }
 

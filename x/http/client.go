@@ -1,7 +1,10 @@
 package http
 
+import "time"
+
 type Client struct {
 	Transport RoundTripper
+	Timeout   time.Duration
 }
 
 var DefaultClient = &Client{}
@@ -34,13 +37,14 @@ func (c *Client) Do(req *Request) (*Response, error) {
 }
 
 func (c *Client) do(req *Request) (*Response, error) {
-	return c.send(req, nil)
+	return c.send(req, c.Timeout)
 }
 
-func (c *Client) send(req *Request, deadline any) (*Response, error) {
-	return send(req, c.transport(), deadline)
+func (c *Client) send(req *Request, timeout time.Duration) (*Response, error) {
+	return send(req, c.transport(), timeout)
 }
 
-func send(req *Request, rt RoundTripper, deadline any) (resp *Response, err error) {
+func send(req *Request, rt RoundTripper, timeout time.Duration) (resp *Response, err error) {
+	req.timeout = timeout
 	return rt.RoundTrip(req)
 }
