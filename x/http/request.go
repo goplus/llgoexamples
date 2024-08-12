@@ -28,13 +28,16 @@ func NewRequest(method, urlStr string, body io.Reader) (*Request, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Request{
+	request := &Request{
 		Method:  method,
 		URL:     parseURL,
 		Req:     req,
 		Host:    parseURL.Hostname(),
+		Header:  make(Header),
 		timeout: 0,
-	}, nil
+	}
+	request.Header.Set("Host", request.Host)
+	return request, nil
 }
 
 func newHyperRequest(method string, URL *url.URL) (*hyper.Request, error) {
@@ -49,11 +52,33 @@ func newHyperRequest(method string, URL *url.URL) (*hyper.Request, error) {
 	if req.SetURI((*uint8)(&[]byte(uri)[0]), c.Strlen(c.AllocaCStr(uri))) != hyper.OK {
 		return nil, fmt.Errorf("error setting uri %s\n", uri)
 	}
-
 	// Set the request headers
 	reqHeaders := req.Headers()
 	if reqHeaders.Set((*uint8)(&[]byte("Host")[0]), c.Strlen(c.Str("Host")), (*uint8)(&[]byte(host)[0]), c.Strlen(c.AllocaCStr(host))) != hyper.OK {
-		return nil, fmt.Errorf("error setting headers\n")
+		return nil, fmt.Errorf("error setting header: Host: %s\n", host)
 	}
+
 	return req, nil
+}
+
+// setHeaders sets the headers of the request
+func (req *Request) setHeaders() error {
+	headers := req.Req.Headers()
+	for key, values := range req.Header {
+		valueLen := len(values)
+		if valueLen > 1 {
+			for _, value := range values {
+				if headers.Add((*uint8)(&[]byte(key)[0]), c.Strlen(c.AllocaCStr(key)), (*uint8)(&[]byte(value)[0]), c.Strlen(c.AllocaCStr(value))) != hyper.OK {
+					return fmt.Errorf("error adding header %s: %s\n", key, value)
+				}
+			}
+		} else if valueLen == 1 {
+			if headers.Set((*uint8)(&[]byte(key)[0]), c.Strlen(c.AllocaCStr(key)), (*uint8)(&[]byte(values[0])[0]), c.Strlen(c.AllocaCStr(values[0]))) != hyper.OK {
+				return fmt.Errorf("error setting header %s: %s\n", key, values[0])
+			}
+		} else {
+			return fmt.Errorf("error setting header %s: empty value\n", key)
+		}
+	}
+	return nil
 }

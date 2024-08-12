@@ -37,6 +37,11 @@ func (c *Client) Do(req *Request) (*Response, error) {
 }
 
 func (c *Client) do(req *Request) (*Response, error) {
+	// Add user-defined request headers to hyper.Request
+	err := req.setHeaders()
+	if err != nil {
+		return nil, err
+	}
 	return c.send(req, c.Timeout)
 }
 

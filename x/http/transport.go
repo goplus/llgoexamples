@@ -184,6 +184,7 @@ func (pc *persistConn) roundTrip(req *Request) (*Response, error) {
 		rc := <-pc.reqch // blocking
 		// Free the resources
 		FreeResources(nil, nil, nil, nil, pc, rc)
+		return nil, fmt.Errorf("request timeout\n")
 	}
 	select {
 	case re := <-resc:
@@ -297,12 +298,26 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 
 				response.Body, bodyWriter = io.Pipe()
 
-				// TODO(spongehah) Replace header operations with using the textproto package
-				lengthSlice := response.Header["content-length"]
-				if lengthSlice == nil {
-					response.ContentLength = 0
+				//// TODO(spongehah) Replace header operations with using the textproto package
+				//lengthSlice := response.Header["content-length"]
+				//if lengthSlice == nil {
+				//	response.ContentLength = -1
+				//} else {
+				//	contentLength := response.Header["content-length"][0]
+				//	length, err := strconv.Atoi(contentLength)
+				//	if err != nil {
+				//		rc.ch <- responseAndError{err: fmt.Errorf("failed to parse content-length")}
+				//		// Free the resources
+				//		FreeResources(task, respBody, bodyWriter, exec, pc, rc)
+				//		return
+				//	}
+				//	response.ContentLength = int64(length)
+				//}
+
+				contentLength := response.Header.Get("content-length")
+				if contentLength == "" {
+					response.ContentLength = -1
 				} else {
-					contentLength := response.Header["content-length"][0]
 					length, err := strconv.Atoi(contentLength)
 					if err != nil {
 						rc.ch <- responseAndError{err: fmt.Errorf("failed to parse content-length")}
