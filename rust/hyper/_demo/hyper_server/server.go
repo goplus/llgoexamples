@@ -49,15 +49,14 @@ func onSignal(handle *libuv.Signal, signum c.Int) {
 	shouldExit = true
 	sigintHandle.Stop()
 	sigtermHandle.Stop()
-	(*libuv.Handle)(unsafe.Pointer(handle)).Close(nil)
+	(*libuv.Handle)(unsafe.Pointer(&server)).Close(nil)
 	loop.Close()
 }
 
 func closeWalkCb(handle *libuv.Handle, arg c.Pointer) {
-	// if handle.IsClosing() == 0 {
-	// 	handle.Close(nil)
-	// }
-	handle.Close(nil)
+	if handle.IsClosing() == 0 {
+		handle.Close(nil)
+	}
 }
 
 func allocBuffer(handle *libuv.Handle, suggestedSize uintptr, buf *libuv.Buf) {
@@ -91,7 +90,7 @@ func closeConn(handle *libuv.Handle) {
 }
 
 func onPoll(handle *libuv.Poll, status c.Int, events c.Int) {
-	conn := (*ConnData)(unsafe.Pointer((*libuv.Handle)(unsafe.Pointer(handle)).GetData()))
+	conn := (*ConnData)((*libuv.Handle)(unsafe.Pointer(handle)).GetData())
 
 	if status < 0 {
 		//fmt.Fprintf(os.Stderr, "Poll error: %s\n", libuv.Strerror(libuv.Errno(status)))
@@ -136,7 +135,7 @@ func readCb(userdata c.Pointer, ctx *hyper.Context, buf *byte, bufLen uintptr) u
 		return uintptr(ret)
 	}
 
-	if syscall.Errno(ret) != syscall.EAGAIN && syscall.Errno(ret) != syscall.EWOULDBLOCK {
+	if uintptr(os.Errno) != syscall.EAGAIN && uintptr(os.Errno) != syscall.EWOULDBLOCK {
 		return hyper.IoError
 	}
 
@@ -163,7 +162,7 @@ func writeCb(userdata c.Pointer, ctx *hyper.Context, buf *byte, bufLen uintptr) 
 		return uintptr(ret)
 	}
 
-	if syscall.Errno(ret) != syscall.EAGAIN && syscall.Errno(ret) != syscall.EWOULDBLOCK {
+	if uintptr(os.Errno) != syscall.EAGAIN && uintptr(os.Errno) != syscall.EWOULDBLOCK {
 		return hyper.IoError
 	}
 
@@ -190,7 +189,6 @@ func createConnData(client *libuv.Tcp) *ConnData {
 		return nil
 	}
 	c.Memcpy(unsafe.Pointer(&conn.Stream), unsafe.Pointer(client), unsafe.Sizeof(libuv.Tcp{}))
-	//c.Memmove(unsafe.Pointer(&conn.Stream), unsafe.Pointer(client), unsafe.Sizeof(libuv.Tcp{}))
 	conn.IsClosing = 0
 	conn.RequestCount = 0
 
@@ -202,8 +200,8 @@ func createConnData(client *libuv.Tcp) *ConnData {
 		return nil
 	}
 
-	(*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).SetData(unsafe.Pointer(conn))
-	(*libuv.Handle)(unsafe.Pointer(&conn.Stream)).SetData(unsafe.Pointer(conn))
+	(*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).Data = unsafe.Pointer(conn)
+	conn.Stream.Data = unsafe.Pointer(conn)
 
 	if !updateConnDataRegistrations(conn, true) {
 		(*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).Close(nil)
@@ -267,7 +265,6 @@ func printBodyChunk(userdata c.Pointer, chunk *hyper.Buf) c.Int {
 func sendEachBodyChunk(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
 	chunkCount := (*c.Int)(userdata)
 	if *chunkCount > 0 {
-		c.Printf(c.Str("Chunk %d\n"), *chunkCount)
 		var data [64]c.Char
 		c.Snprintf((*c.Char)(&data[0]), unsafe.Sizeof(data), c.Str("Chunk %d\n"), *chunkCount)
 		*chunk = hyper.CopyBuf((*byte)(unsafe.Pointer(&data[0])), c.Strlen((*c.Char)(&data[0])))
@@ -292,12 +289,11 @@ func serverCallback(userdata c.Pointer, request *hyper.Request, channel *hyper.R
 	conn.RequestCount++
 	// fmt.Printf("Handling request %d on connection from %s:%s\n", conn.RequestCount,
 	// 	c.GoString((*c.Char)(&serviceData.Host[0])), c.GoString((*c.Char)(&serviceData.Port[0])))
-	c.Printf(c.Str("Handling request %d on connection from %s:%s\n"), c.Int(conn.RequestCount),
+	c.Printf(c.Str("Handling request %d on connection from %s:%s\n"), conn.RequestCount,
 		(*c.Char)(&serviceData.Host[0]), (*c.Char)(&serviceData.Port[0]))
 
 	// fmt.Printf("Received request from %s:%s\n", c.GoString((*c.Char)(&serviceData.Host[0])),
-	// 	c.GoString((*c.Char)(&serviceData.Port[0])))
-	c.Printf(c.Str("Received request from %s:%s\n"), (*c.Char)(&serviceData.Host[0]), (*c.Char)(&serviceData.Port[0]))
+	//c.Printf(c.Str("Received request from %s:%s\n"), (*c.Char)(&serviceData.Host[0]), (*c.Char)(&serviceData.Port[0]))
 
 	if request == nil {
 		//fmt.Fprintf(os.Stderr, "Error: Received null request\n")
@@ -392,46 +388,47 @@ func serverCallback(userdata c.Pointer, request *hyper.Request, channel *hyper.R
 	}
 
 	response := hyper.NewResponse()
-	// if response != nil {
-	// 	response.SetStatus(200)
-	// 	rspHeaders := response.Headers()
-	// 	if rspHeaders != nil {
-	// 		rspHeaders.Set((*byte)(unsafe.Pointer(c.Str("Content-Type"))), uintptr(12), (*byte)(unsafe.Pointer(c.Str("text/plain"))), uintptr(10))
-	// 		rspHeaders.Set((*byte)(unsafe.Pointer(c.Str("Cache-Control"))), uintptr(13), (*byte)(unsafe.Pointer(c.Str("no-cache"))), uintptr(8))
-	// 	} else {
-	// 		//fmt.Fprintf(os.Stderr, "Error: Failed to get response headers\n")
-	// 		c.Printf(c.Str("Error: Failed to get response headers\n"))
-	// 	}
-
-	// 	if methodLen > 0 && c.Strncmp((*c.Char)(unsafe.Pointer(&method[0])), c.Str("GET"), methodLen) == 0 {
-	// 		c.Printf(c.Str("Sending GET response\n"))
-	// 		body := hyper.NewBody()
-	// 		if body != nil {
-	// 			body.SetDataFunc(sendEachBodyChunk)
-	// 			chunkCount := (*c.Int)(c.Malloc(unsafe.Sizeof(c.Int(0))))
-	// 			if chunkCount != nil {
-	// 				*chunkCount = 10
-	// 				body.SetUserdata(unsafe.Pointer(chunkCount), func(p c.Pointer) { c.Free(p) })
-	// 				response.SetBody(body)
-	// 			} else {
-	// 				//fmt.Fprintf(os.Stderr, "Error: Failed to allocate chunk_count\n")
-	// 				c.Printf(c.Str("Error: Failed to allocate chunk_count\n"))
-	// 			}
-	// 		} else {
-	// 			//fmt.Fprintf(os.Stderr, "Error: Failed to create response body\n")
-	// 			c.Printf(c.Str("Error: Failed to create response body\n"))
-	// 		}
-	// 	}
-
-	// 	channel.Send(response)
-	// } else {
-	// 	//fmt.Fprintf(os.Stderr, "Error: Failed to create response\n")
-	// 	c.Printf(c.Str("Error: Failed to create response\n"))
-	// }
 	if response != nil {
 		response.SetStatus(200)
+		rspHeaders := response.Headers()
+		if rspHeaders != nil {
+			hres := rspHeaders.Set((*byte)(unsafe.Pointer(c.Str("Content-Type"))), uintptr(12), (*byte)(unsafe.Pointer(c.Str("text/plain"))), uintptr(10))
+			if hres != hyper.OK {
+				c.Printf(c.Str("Error: Failed to set response headers\n"))
+			}
+			hres = rspHeaders.Set((*byte)(unsafe.Pointer(c.Str("Cache-Control"))), uintptr(13), (*byte)(unsafe.Pointer(c.Str("no-cache"))), uintptr(8))
+			if hres != hyper.OK {
+				c.Printf(c.Str("Error: Failed to set response headers\n"))
+			}
+			// Print all headers
+			//rspHeaders.Foreach(printEachHeader, nil)
+		} else {
+			//fmt.Fprintf(os.Stderr, "Error: Failed to get response headers\n")
+			c.Printf(c.Str("Error: Failed to get response headers\n"))
+		}
+
+		if methodLen > 0 && c.Strncmp((*c.Char)(unsafe.Pointer(&method[0])), c.Str("GET"), methodLen) == 0 {
+			body := hyper.NewBody()
+			if body != nil {
+				body.SetDataFunc(sendEachBodyChunk)
+				chunkCount := (*c.Int)(c.Malloc(unsafe.Sizeof(c.Int(0))))
+				if chunkCount != nil {
+					*chunkCount = 10
+					body.SetUserdata(unsafe.Pointer(chunkCount), func(p c.Pointer) { c.Free(p) })
+					response.SetBody(body)
+				} else {
+					//fmt.Fprintf(os.Stderr, "Error: Failed to allocate chunk_count\n")
+					c.Printf(c.Str("Error: Failed to allocate chunk_count\n"))
+				}
+			} else {
+				//fmt.Fprintf(os.Stderr, "Error: Failed to create response body\n")
+				c.Printf(c.Str("Error: Failed to create response body\n"))
+			}
+		}
+
 		channel.Send(response)
 	} else {
+		//fmt.Fprintf(os.Stderr, "Error: Failed to create response\n")
 		c.Printf(c.Str("Error: Failed to create response\n"))
 	}
 
@@ -465,11 +462,11 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 		if addr.Family == net.AF_INET {
 			s := (*net.SockaddrIn)(unsafe.Pointer(&addr))
 			libuv.Ip4Name(s, (*c.Char)(&userdata.Host[0]), unsafe.Sizeof(userdata.Host))
-			c.Snprintf((*c.Char)(&userdata.Port[0]), unsafe.Sizeof(userdata.Port), c.Str("%d"), Ntohs(s.Port))
+			c.Snprintf((*c.Char)(&userdata.Port[0]), unsafe.Sizeof(userdata.Port), c.Str("%d"), net.Ntohs(s.Port))
 		} else if addr.Family == net.AF_INET6 {
 			s := (*net.SockaddrIn6)(unsafe.Pointer(&addr))
 			libuv.Ip6Name(s, (*c.Char)(&userdata.Host[0]), unsafe.Sizeof(userdata.Host))
-			c.Snprintf((*c.Char)(&userdata.Port[0]), unsafe.Sizeof(userdata.Port), c.Str("%d"), Ntohs(s.Port))
+			c.Snprintf((*c.Char)(&userdata.Port[0]), unsafe.Sizeof(userdata.Port), c.Str("%d"), net.Ntohs(s.Port))
 		}
 
 		// fmt.Printf("New incoming connection from (%s:%s)\n", c.GoString((*c.Char)(&userdata.Host[0])),
@@ -561,11 +558,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	libuv.SignalInit(loop, &sigintHandle)
-	sigintHandle.Start(onSignal, c.Int(syscall.SIGINT))
+	signalRes := libuv.SignalInit(loop, &sigintHandle)
+	if signalRes != 0 {
+		c.Printf(c.Str("Failed to initialize signal handler: %d\n"), signalRes)
+	}
+	signalHandleRes := sigintHandle.Start(onSignal, c.Int(syscall.SIGINT))
+	if signalHandleRes != 0 {
+		c.Printf(c.Str("Failed to start signal handler: %d\n"), signalHandleRes)
+	}
 
-	libuv.SignalInit(loop, &sigtermHandle)
-	sigtermHandle.Start(onSignal, c.Int(syscall.SIGTERM))
+	signalRes = libuv.SignalInit(loop, &sigtermHandle)
+	if signalRes != 0 {
+		c.Printf(c.Str("Failed to initialize signal handler: %d\n"), signalRes)
+	}
+	signalHandleRes = sigtermHandle.Start(onSignal, c.Int(syscall.SIGTERM))
+	if signalHandleRes != 0 {
+		c.Printf(c.Str("Failed to start signal handler: %d\n"), signalHandleRes)
+	}
 
 	//fmt.Printf("http handshake (hyper v%s) ...\n", c.GoString(hyper.Version()))
 	c.Printf(c.Str("http handshake (hyper v%s) ...\n"), hyper.Version())
@@ -585,94 +594,49 @@ func main() {
 					conn := (*ConnData)(taskUserdata)
 					//fmt.Printf("Connection task completed for request %d\n", conn.RequestCount)
 					c.Printf(c.Str("Connection task completed for request %d\n"), conn.RequestCount)
-					c.Printf(c.Str("IsClosing: %d\n"), c.Int(conn.IsClosing))
-					// if conn.IsClosing == 0 {
-					// 	c.Printf(c.Str("Closing connection\n"))
-					// 	conn.IsClosing = 1
-					// 	if (*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).IsClosing() != 0 {
-					// 		c.Printf(c.Str("Closing poll handle\n"))
-					// 		(*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).Close(onClose)
-					// 	}
-					// 	if (*libuv.Handle)(unsafe.Pointer(&conn.Stream)).IsClosing() != 0 {
-					// 		c.Printf(c.Str("Closing stream\n"))
-					// 		(*libuv.Handle)(unsafe.Pointer(&conn.Stream)).Close(onClose)
-					// 	}
-					// }
-					if (*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).IsClosing() == 0 {
-						c.Printf(c.Str("Closing poll handle\n"))
-						(*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).Close(onClose)
-					}
-					if (*libuv.Handle)(unsafe.Pointer(&conn.Stream)).IsClosing() == 0 {
-						c.Printf(c.Str("Closing stream\n"))
-						(*libuv.Handle)(unsafe.Pointer(&conn.Stream)).Close(onClose)
+					c.Printf(c.Str("hyper.TaskEmpty IsClosing: %d\n"), conn.IsClosing)
+					if conn.IsClosing == 0 {
+						c.Printf(c.Str("Closing connection\n"))
+						conn.IsClosing = 1
+						if (*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).IsClosing() == 0 {
+							c.Printf(c.Str("Closing poll handle\n"))
+							(*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).Close(nil)
+						}
+						if (*libuv.Handle)(unsafe.Pointer(&conn.Stream)).IsClosing() == 0 {
+							c.Printf(c.Str("Closing stream\n"))
+							(*libuv.Handle)(unsafe.Pointer(&conn.Stream)).Close(closeConn)
+						}
 					}
 				}
-				conn := (*ConnData)(taskUserdata)
-				if (*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).IsClosing() == 0 {
-					c.Printf(c.Str("Closing poll handle\n"))
-					(*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).Close(onClose)
-				}
-				if (*libuv.Handle)(unsafe.Pointer(&conn.Stream)).IsClosing() == 0 {
-					c.Printf(c.Str("Closing stream\n"))
-					(*libuv.Handle)(unsafe.Pointer(&conn.Stream)).Close(onClose)
-				}
-				break
 
 			case hyper.TaskError:
 				err := (*hyper.Error)(task.Value())
 				var errbuf [256]byte
 				errlen := err.Print(&errbuf[0], unsafe.Sizeof(errbuf))
-				//fmt.Fprintf(os.Stderr, "Task error: %.*s\n", int(errlen), c.GoString((*c.Char)(unsafe.Pointer(&errbuf[0]))))
+				//fmt.Fprintf(os.Stderr, c.Str("Task error: %.*s\n"), errlen, (*c.Char)(unsafe.Pointer(&errbuf[0])))
 				c.Printf(c.Str("Task error: %.*s\n"), errlen, (*c.Char)(unsafe.Pointer(&errbuf[0])))
+				c.Printf(c.Str("Error code: %d\n"), c.Int(err.Code()))
 				err.Free()
-				conn := (*ConnData)(taskUserdata)
-				c.Printf(c.Str("IsClosing: %d\n"), c.Int(conn.IsClosing))
-				// if conn.IsClosing == 0 {
-				// 	c.Printf(c.Str("Closing connection\n"))
-				// 	conn.IsClosing = 1
-				// 	if (*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).IsClosing() != 0 {
-				// 		c.Printf(c.Str("Closing poll handle\n"))
-				// 		(*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).Close(onClose)
-				// 	}
-				// 	if (*libuv.Handle)(unsafe.Pointer(&conn.Stream)).IsClosing() != 0 {
-				// 		c.Printf(c.Str("Closing stream\n"))
-				// 		(*libuv.Handle)(unsafe.Pointer(&conn.Stream)).Close(onClose)
-				// 	}
-				// }
-				if (*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).IsClosing() == 0 {
-					c.Printf(c.Str("Closing poll handle\n"))
-					(*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).Close(onClose)
-				}
-				if (*libuv.Handle)(unsafe.Pointer(&conn.Stream)).IsClosing() == 0 {
-					c.Printf(c.Str("Closing stream\n"))
-					(*libuv.Handle)(unsafe.Pointer(&conn.Stream)).Close(onClose)
-				}
-				break
 
 			case hyper.TaskClientConn:
 				//fmt.Fprintf(os.Stderr, "Unexpected HYPER_TASK_CLIENTCONN in server context\n")
 				c.Printf(c.Str("Unexpected HYPER_TASK_CLIENTCONN in server context\n"))
-				break
 
 			case hyper.TaskResponse:
 				//fmt.Println("Response task received")
 				c.Printf(c.Str("Response task received\n"))
-				break
 
 			case hyper.TaskBuf:
 				//fmt.Println("Buffer task received")
 				c.Printf(c.Str("Buffer task received\n"))
-				break
 
 			case hyper.TaskServerconn:
 				//fmt.Println("Server connection task received: ready for new connection...")
 				c.Printf(c.Str("Server connection task received: ready for new connection...\n"))
-				break
 
 			default:
 				//fmt.Fprintf(os.Stderr, "Unknown task type: %d\n", taskType)
 				c.Printf(c.Str("Unknown task type: %d\n"), taskType)
-				break
 			}
 
 			if taskUserdata == nil && taskType != hyper.TaskEmpty && taskType != hyper.TaskServerconn {
@@ -700,7 +664,6 @@ func main() {
 	//fmt.Println("Closing all handles...")
 	c.Printf(c.Str("Closing all handles...\n"))
 	loop.Walk(closeWalkCb, nil)
-
 	loop.Run(libuv.RUN_DEFAULT)
 
 	loop.Close()
@@ -708,18 +671,5 @@ func main() {
 
 	//fmt.Println("Shutdown complete.")
 	c.Printf(c.Str("Shutdown complete.\n"))
-}
-
-// Ntohs converts a 16-bit integer from network byte order to host byte order.
-func Ntohs(x uint16) uint16 {
-	if isLittleEndian() {
-		return ((x & 0xFF00) >> 8) | ((x & 0x00FF) << 8)
-	}
-	return x
-}
-
-// isLittleEndian checks if the host machine is little-endian.
-func isLittleEndian() bool {
-	var i int32 = 0x01020304
-	return *(*byte)(unsafe.Pointer(&i)) == 0x04
+	os.Exit(0)
 }
