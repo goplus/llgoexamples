@@ -3,7 +3,6 @@ package http
 import (
 	"fmt"
 	"io"
-	"strconv"
 	"unsafe"
 
 	"github.com/goplus/llgo/c"
@@ -229,7 +228,11 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 	// Poll all ready tasks and act on them...
 	rc := <-pc.reqch // blocking
 	alive := true
-	var response Response
+	resp := &Response{
+		Request: rc.req,
+		Header:  make(Header),
+		Trailer: make(Header),
+	}
 	var bodyWriter *io.PipeWriter
 	var respBody *hyper.Body = nil
 	for alive {
@@ -283,52 +286,22 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 				}
 
 				// Take the results
-				resp := (*hyper.Response)(task.Value())
+				hyperResp := (*hyper.Response)(task.Value())
 				task.Free()
 
-				rp := resp.ReasonPhrase()
-				rpLen := resp.ReasonPhraseLen()
-
-				response.Status = strconv.Itoa(int(resp.Status())) + " " + string((*[1 << 30]byte)(c.Pointer(rp))[:rpLen:rpLen])
-				response.StatusCode = int(resp.Status())
-
-				headers := resp.Headers()
-				headers.Foreach(AppendToResponseHeader, c.Pointer(&response))
-				respBody = resp.Body()
-
-				response.Body, bodyWriter = io.Pipe()
-
-				//// TODO(spongehah) Replace header operations with using the textproto package
-				//lengthSlice := response.Header["content-length"]
-				//if lengthSlice == nil {
-				//	response.ContentLength = -1
-				//} else {
-				//	contentLength := response.Header["content-length"][0]
-				//	length, err := strconv.Atoi(contentLength)
-				//	if err != nil {
-				//		rc.ch <- responseAndError{err: fmt.Errorf("failed to parse content-length")}
-				//		// Free the resources
-				//		FreeResources(task, respBody, bodyWriter, exec, pc, rc)
-				//		return
-				//	}
-				//	response.ContentLength = int64(length)
+				readResponseLineAndHeader(resp, hyperResp)
+				//err = readTransfer(resp, hyperResp)
+				//if err != nil {
+				//	rc.ch <- responseAndError{err: err}
+				//	// Free the resources
+				//	FreeResources(task, respBody, bodyWriter, exec, pc, rc)
+				//	return
 				//}
 
-				contentLength := response.Header.Get("content-length")
-				if contentLength == "" {
-					response.ContentLength = -1
-				} else {
-					length, err := strconv.Atoi(contentLength)
-					if err != nil {
-						rc.ch <- responseAndError{err: fmt.Errorf("failed to parse content-length")}
-						// Free the resources
-						FreeResources(task, respBody, bodyWriter, exec, pc, rc)
-						return
-					}
-					response.ContentLength = int64(length)
-				}
+				respBody = hyperResp.Body()
+				resp.Body, bodyWriter = io.Pipe()
 
-				rc.ch <- responseAndError{res: &response}
+				rc.ch <- responseAndError{res: resp}
 
 				// Response has been returned, stop the timer
 				pc.conn.IsCompleted = 1
@@ -343,7 +316,7 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 				exec.Push(dataTask)
 
 				// No longer need the response
-				resp.Free()
+				hyperResp.Free()
 			case ReceiveRespBody:
 				err := CheckTaskType(task, ReceiveRespBody)
 				if err != nil {

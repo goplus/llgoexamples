@@ -36,7 +36,8 @@ func NewRequest(method, urlStr string, body io.Reader) (*Request, error) {
 		Header:  make(Header),
 		timeout: 0,
 	}
-	request.Header.Set("Host", request.Host)
+	//request.Header.Set("Host", request.Host)
+	request.Header["Host"] = []string{request.Host}
 	return request, nil
 }
 
