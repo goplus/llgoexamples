@@ -1,8 +1,7 @@
 package http
 
 import (
-	"unsafe"
-
+	"github.com/goplus/llgo/c"
 	"github.com/goplus/llgo/rust/hyper"
 )
 
@@ -41,12 +40,12 @@ func (r *Response) WriteHeader(statusCode int) {
 	r.statusCode = statusCode
 
 	resp := hyper.NewResponse()
-	resp.SetStatus(uint(statusCode))
+	resp.SetStatus(uint16(statusCode))
 
 	headers := resp.Headers()
 	for k, v := range r.header {
 		for _, val := range v {
-			headers.Set([]byte(k), uintptr(len(k)), []byte(val), uintptr(len(val)))
+			headers.Set(&[]byte(k)[0], uintptr(len(k)), &[]byte(val)[0], uintptr(len(val)))
 		}
 	}
 
@@ -59,15 +58,16 @@ func (r *Response) finalize() error {
 	}
 
 	body := hyper.NewBody()
-	body.SetDataFunc(func(userdata unsafe.Pointer, ctx *hyper.Context, chunk **hyper.Buf) int {
-		*chunk = hyper.CopyBuf(r.body, uintptr(len(r.body)))
-		r.body = nil // Clear the body after sending
-		return hyper.PollReady
-	})
+	//TODO(hackerchai): implement body data func
+	body.SetDataFunc()
 
 	resp := hyper.NewResponse()
 	resp.SetBody(body)
 
 	r.channel.Send(resp)
 	return nil
+}
+
+//TODO(hackerchai): implement body chunk reader
+func setBodyDataFunc(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
 }
