@@ -8,14 +8,12 @@ import (
 )
 
 func main() {
-	resp, err := http.Get("https://www.baidu.com")
+	resp, err := http.Post("https://jsonplaceholder.typicode.com/posts", "application/json; charset=UTF-8", nil)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	fmt.Println(resp.Status, "read bytes: ", resp.ContentLength)
-	fmt.Println(resp.Proto)
-	resp.PrintHeaders()
+	fmt.Println(resp.Status)
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Println(err)

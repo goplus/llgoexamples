@@ -228,11 +228,6 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 	// Poll all ready tasks and act on them...
 	rc := <-pc.reqch // blocking
 	alive := true
-	resp := &Response{
-		Request: rc.req,
-		Header:  make(Header),
-		Trailer: make(Header),
-	}
 	var bodyWriter *io.PipeWriter
 	var respBody *hyper.Body = nil
 	for alive {
@@ -263,8 +258,17 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 				client := (*hyper.ClientConn)(task.Value())
 				task.Free()
 
+				// Prepare the hyper.Request
+				hyperReq, err := newHyperRequest(rc.req)
+				if err != nil {
+					rc.ch <- responseAndError{err: err}
+					// Free the resources
+					FreeResources(task, respBody, bodyWriter, exec, pc, rc)
+					return
+				}
+
 				// Send it!
-				sendTask := client.Send(rc.req.Req)
+				sendTask := client.Send(hyperReq)
 				SetTaskId(sendTask, ReceiveResp)
 				sendRes := exec.Push(sendTask)
 				if sendRes != hyper.OK {
@@ -289,14 +293,13 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 				hyperResp := (*hyper.Response)(task.Value())
 				task.Free()
 
-				readResponseLineAndHeader(resp, hyperResp)
-				//err = readTransfer(resp, hyperResp)
-				//if err != nil {
-				//	rc.ch <- responseAndError{err: err}
-				//	// Free the resources
-				//	FreeResources(task, respBody, bodyWriter, exec, pc, rc)
-				//	return
-				//}
+				resp, err := ReadResponse(hyperResp, rc.req)
+				if err != nil {
+					rc.ch <- responseAndError{err: err}
+					// Free the resources
+					FreeResources(task, respBody, bodyWriter, exec, pc, rc)
+					return
+				}
 
 				respBody = hyperResp.Body()
 				resp.Body, bodyWriter = io.Pipe()
@@ -395,6 +398,8 @@ func AllocBuffer(handle *libuv.Handle, suggestedSize uintptr, buf *libuv.Buf) {
 	conn := (*ConnData)(handle.GetData())
 	if conn.ReadBuf.Base == nil {
 		conn.ReadBuf = libuv.InitBuf((*c.Char)(c.Malloc(suggestedSize)), c.Uint(suggestedSize))
+		//base := make([]byte, suggestedSize)
+		//conn.ReadBuf = libuv.InitBuf((*c.Char)(c.Pointer(&base[0])), c.Uint(suggestedSize))
 		conn.ReadBufFilled = 0
 	}
 	*buf = libuv.InitBuf((*c.Char)(c.Pointer(uintptr(c.Pointer(conn.ReadBuf.Base))+conn.ReadBufFilled)), c.Uint(suggestedSize-conn.ReadBufFilled))
