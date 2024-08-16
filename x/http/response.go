@@ -20,15 +20,21 @@ type Response struct {
 	ContentLength    int64
 	TransferEncoding []string
 	Close            bool
-	Trailer          Header
-	Request          *Request
+	//Trailer          Header
+	Request *Request
+}
+
+func (r *Response) closeBody() {
+	if r.Body != nil {
+		r.Body.Close()
+	}
 }
 
 func ReadResponse(hyperResp *hyper.Response, req *Request) (*Response, error) {
 	resp := &Response{
 		Request: req,
 		Header:  make(Header),
-		Trailer: make(Header),
+		//Trailer: make(Header),
 	}
 	readResponseLineAndHeader(resp, hyperResp)
 
@@ -54,7 +60,7 @@ func readResponseLineAndHeader(resp *Response, hyperResp *hyper.Response) {
 	resp.Proto = fmt.Sprintf("HTTP/%d.%d", resp.ProtoMajor, resp.ProtoMinor)
 
 	headers := hyperResp.Headers()
-	headers.Foreach(AppendToResponseHeader, c.Pointer(resp))
+	headers.Foreach(appendToResponseHeader, c.Pointer(resp))
 }
 
 // RFC 7234, section 5.4: Should treat
@@ -70,4 +76,9 @@ func fixPragmaCacheControl(header Header) {
 			header["Cache-Control"] = []string{"no-cache"}
 		}
 	}
+}
+
+// Cookies parses and returns the cookies set in the Set-Cookie headers.
+func (r *Response) Cookies() []*Cookie {
+	return readSetCookies(r.Header)
 }

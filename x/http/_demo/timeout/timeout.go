@@ -10,8 +10,8 @@ import (
 
 func main() {
 	client := &http.Client{
-		Timeout: time.Millisecond, // Set a small timeout to ensure it will time out
-		//Timeout: time.Second * 5,
+		//Timeout: time.Millisecond, // Set a small timeout to ensure it will time out
+		Timeout: time.Second * 5,
 	}
 	req, err := http.NewRequest("GET", "https://www.baidu.com", nil)
 	if err != nil {

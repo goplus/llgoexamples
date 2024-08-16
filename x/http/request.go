@@ -1,10 +1,16 @@
 package http
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"io"
+	"net/textproto"
 	"net/url"
+	"strings"
 	"time"
+
+	"golang.org/x/net/idna"
 
 	"github.com/goplus/llgo/c"
 	"github.com/goplus/llgo/c/os"
@@ -24,79 +30,124 @@ type Request struct {
 	TransferEncoding []string
 	Close            bool
 	Host             string
-	timeout          time.Duration
+	//Form             url.Values
+	//PostForm         url.Values
+	//MultipartForm    *multipart.Form
+	Trailer    Header
+	RemoteAddr string
+	RequestURI string
+	//TLS              *tls.ConnectionState
+	Cancel   <-chan struct{}
+	Response *Response
+	timeout  time.Duration
+	ctx      context.Context
 }
 
-type postBody struct {
-	data    []byte
-	len     uintptr
-	readLen uintptr
-}
-
-type uploadBody struct {
-	fd  c.Int
-	buf []byte
-	len uintptr
-}
-
-var DefaultChunkSize uintptr = 8192
+var defaultChunkSize uintptr = 8192
 
 func NewRequest(method, urlStr string, body io.Reader) (*Request, error) {
+	if method == "" {
+		// We document that "" means "GET" for Request.Method, and people have
+		// relied on that from NewRequest, so keep that working.
+		// We still enforce validMethod for non-empty methods.
+		method = "GET"
+	}
+	if !validMethod(method) {
+		return nil, fmt.Errorf("net/http: invalid method %q", method)
+	}
+	//if ctx == nil {
+	//	return nil, errors.New("net/http: nil Context")
+	//}
 	u, err := url.Parse(urlStr)
 	if err != nil {
 		return nil, err
 	}
-	//rc, ok := body.(io.ReadCloser)
-	//if !ok && body != nil {
-	//	rc = io.NopCloser(body)
-	//}
-	request := &Request{
+	rc, ok := body.(io.ReadCloser)
+	if !ok && body != nil {
+		rc = io.NopCloser(body)
+	}
+	// The host's colon:port should be normalized. See Issue 14836.
+	u.Host = removeEmptyPort(u.Host)
+	req := &Request{
+		//ctx:        ctx,
 		Method:     method,
 		URL:        u,
 		Proto:      "HTTP/1.1",
 		ProtoMajor: 1,
 		ProtoMinor: 1,
 		Header:     make(Header),
+		Body:       rc,
 		Host:       u.Host,
-		//Body:       rc,
-		timeout: 0,
 	}
-	request.Header.Set("Host", request.Host)
+	if body != nil {
+		switch v := body.(type) {
+		case *bytes.Buffer:
+			req.ContentLength = int64(v.Len())
+			buf := v.Bytes()
+			req.GetBody = func() (io.ReadCloser, error) {
+				r := bytes.NewReader(buf)
+				return io.NopCloser(r), nil
+			}
+		case *bytes.Reader:
+			req.ContentLength = int64(v.Len())
+			snapshot := *v
+			req.GetBody = func() (io.ReadCloser, error) {
+				r := snapshot
+				return io.NopCloser(&r), nil
+			}
+		case *strings.Reader:
+			req.ContentLength = int64(v.Len())
+			snapshot := *v
+			req.GetBody = func() (io.ReadCloser, error) {
+				r := snapshot
+				return io.NopCloser(&r), nil
+			}
+		default:
+			// This is where we'd set it to -1 (at least
+			// if body != NoBody) to mean unknown, but
+			// that broke people during the Go 1.8 testing
+			// period. People depend on it being 0 I
+			// guess. Maybe retry later. See Issue 18117.
+		}
+		// For client requests, Request.ContentLength of 0
+		// means either actually 0, or unknown. The only way
+		// to explicitly say that the ContentLength is zero is
+		// to set the Body to nil. But turns out too much code
+		// depends on NewRequest returning a non-nil Body,
+		// so we use a well-known ReadCloser variable instead
+		// and have the http package also treat that sentinel
+		// variable to mean explicitly zero.
+		if req.GetBody != nil && req.ContentLength == 0 {
+			req.Body = NoBody
+			req.GetBody = func() (io.ReadCloser, error) { return NoBody, nil }
+		}
+	}
 
-	return request, nil
+	return req, nil
 }
 
-func PrintInformational(userdata c.Pointer, resp *hyper.Response) {
+func printInformational(userdata c.Pointer, resp *hyper.Response) {
 	status := resp.Status()
 	fmt.Println("Informational (1xx): ", status)
 }
 
-func SetPostData(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
-	//upload := (*uploadBody)(userdata)
-	//res := os.Read(upload.fd, c.Pointer(&upload.buf[0]), upload.len)
-	//if res > 0 {
-	//	*chunk = hyper.CopyBuf(&upload.buf[0], uintptr(res))
-	//	return hyper.PollReady
-	//}
-	//if res == 0 {
-	//	*chunk = nil
-	//	os.Close(upload.fd)
-	//	return hyper.PollReady
-	//}
-	body := (*postBody)(userdata)
-	if body.len > 0 {
-		if body.len > DefaultChunkSize {
-			*chunk = hyper.CopyBuf(&body.data[body.readLen], DefaultChunkSize)
-			body.readLen += DefaultChunkSize
-			body.len -= DefaultChunkSize
-		} else {
-			*chunk = hyper.CopyBuf(&body.data[body.readLen], body.len)
-			body.readLen += body.len
-			body.len = 0
+func setPostData(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
+	req := (*Request)(userdata)
+	buffer := make([]byte, defaultChunkSize)
+	n, err := req.Body.Read(buffer)
+	if err != nil {
+		if err == io.EOF {
+			*chunk = nil
+			return hyper.PollReady
 		}
+		fmt.Println("error reading upload file: ", err)
+		return hyper.PollError
+	}
+	if n > 0 {
+		*chunk = hyper.CopyBuf(&buffer[0], uintptr(n))
 		return hyper.PollReady
 	}
-	if body.len == 0 {
+	if n == 0 {
 		*chunk = nil
 		return hyper.PollReady
 	}
@@ -107,7 +158,7 @@ func SetPostData(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.In
 
 func newHyperRequest(req *Request) (*hyper.Request, error) {
 	host := req.Host
-	uri := req.URL.Path
+	uri := req.URL.RequestURI()
 	method := req.Method
 	// Prepare the request
 	hyperReq := hyper.NewRequest()
@@ -124,27 +175,13 @@ func newHyperRequest(req *Request) (*hyper.Request, error) {
 		return nil, fmt.Errorf("error setting header: Host: %s\n", host)
 	}
 
-	if method == "POST" {
-		//var upload uploadBody
-		//upload.fd = os.Open(c.Str("/Users/spongehah/go/src/llgo/x/http/_demo/post/example.txt"), os.O_RDONLY)
-		//if upload.fd < 0 {
-		//	return nil, fmt.Errorf("error opening file to upload: %s\n", c.GoString(c.Strerror(os.Errno)))
-		//}
-		//upload.len = 8192
-		//upload.buf = make([]byte, upload.len)
+	if method == "POST" && req.Body != nil {
 		req.Header.Set("expect", "100-continue")
-		hyperReq.OnInformational(PrintInformational, nil)
-		postData := []byte(`{"id":1,"title":"foo","body":"bar","userId":"1"}`)
-
-		reqBody := &postBody{
-			data: postData,
-			len:  uintptr(len(postData)),
-		}
+		hyperReq.OnInformational(printInformational, nil)
 
 		hyperReqBody := hyper.NewBody()
-		hyperReqBody.SetUserdata(c.Pointer(reqBody))
-		//hyperReqBody.SetUserdata(c.Pointer(&upload))
-		hyperReqBody.SetDataFunc(SetPostData)
+		hyperReqBody.SetUserdata(c.Pointer(req))
+		hyperReqBody.SetDataFunc(setPostData)
 		hyperReq.SetBody(hyperReqBody)
 	}
 
@@ -184,4 +221,121 @@ func (r *Request) closeBody() error {
 		return nil
 	}
 	return r.Body.Close()
+}
+
+func validMethod(method string) bool {
+	/*
+	     Method         = "OPTIONS"                ; Section 9.2
+	                    | "GET"                    ; Section 9.3
+	                    | "HEAD"                   ; Section 9.4
+	                    | "POST"                   ; Section 9.5
+	                    | "PUT"                    ; Section 9.6
+	                    | "DELETE"                 ; Section 9.7
+	                    | "TRACE"                  ; Section 9.8
+	                    | "CONNECT"                ; Section 9.9
+	                    | extension-method
+	   extension-method = token
+	     token          = 1*<any CHAR except CTLs or separators>
+	*/
+	return len(method) > 0 && strings.IndexFunc(method, isNotToken) == -1
+}
+
+// Context returns the request's context. To change the context, use
+// Clone or WithContext.
+//
+// The returned context is always non-nil; it defaults to the
+// background context.
+//
+// For outgoing client requests, the context controls cancellation.
+//
+// For incoming server requests, the context is canceled when the
+// client's connection closes, the request is canceled (with HTTP/2),
+// or when the ServeHTTP method returns.
+func (r *Request) Context() context.Context {
+	if r.ctx != nil {
+		return r.ctx
+	}
+	return context.Background()
+}
+
+// AddCookie adds a cookie to the request. Per RFC 6265 section 5.4,
+// AddCookie does not attach more than one Cookie header field. That
+// means all cookies, if any, are written into the same line,
+// separated by semicolon.
+// AddCookie only sanitizes c's name and value, and does not sanitize
+// a Cookie header already present in the request.
+func (r *Request) AddCookie(c *Cookie) {
+	s := fmt.Sprintf("%s=%s", sanitizeCookieName(c.Name), sanitizeCookieValue(c.Value))
+	if c := r.Header.Get("Cookie"); c != "" {
+		r.Header.Set("Cookie", c+"; "+s)
+	} else {
+		r.Header.Set("Cookie", s)
+	}
+}
+
+// requiresHTTP1 reports whether this request requires being sent on
+// an HTTP/1 connection.
+func (r *Request) requiresHTTP1() bool {
+	return hasToken(r.Header.Get("Connection"), "upgrade") &&
+		EqualFold(r.Header.Get("Upgrade"), "websocket")
+}
+
+// Cookies parses and returns the HTTP cookies sent with the request.
+func (r *Request) Cookies() []*Cookie {
+	return readCookies(r.Header, "")
+}
+
+// readCookies parses all "Cookie" values from the header h and
+// returns the successfully parsed Cookies.
+//
+// if filter isn't empty, only cookies of that name are returned.
+func readCookies(h Header, filter string) []*Cookie {
+	lines := h["Cookie"]
+	if len(lines) == 0 {
+		return []*Cookie{}
+	}
+
+	cookies := make([]*Cookie, 0, len(lines)+strings.Count(lines[0], ";"))
+	for _, line := range lines {
+		line = textproto.TrimString(line)
+
+		var part string
+		for len(line) > 0 { // continue since we have rest
+			part, line, _ = strings.Cut(line, ";")
+			part = textproto.TrimString(part)
+			if part == "" {
+				continue
+			}
+			name, val, _ := strings.Cut(part, "=")
+			name = textproto.TrimString(name)
+			if !isCookieNameValid(name) {
+				continue
+			}
+			if filter != "" && filter != name {
+				continue
+			}
+			val, ok := parseCookieValue(val, true)
+			if !ok {
+				continue
+			}
+			cookies = append(cookies, &Cookie{Name: name, Value: val})
+		}
+	}
+	return cookies
+}
+
+func idnaASCII(v string) (string, error) {
+	// TODO: Consider removing this check after verifying performance is okay.
+	// Right now punycode verification, length checks, context checks, and the
+	// permissible character tests are all omitted. It also prevents the ToASCII
+	// call from salvaging an invalid IDN, when possible. As a result it may be
+	// possible to have two IDNs that appear identical to the user where the
+	// ASCII-only version causes an error downstream whereas the non-ASCII
+	// version does not.
+	// Note that for correct ASCII IDNs ToASCII will only do considerably more
+	// work, but it will not cause an allocation.
+	if Is(v) {
+		return v, nil
+	}
+	return idna.Lookup.ToASCII(v)
 }

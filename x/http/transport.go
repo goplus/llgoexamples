@@ -3,6 +3,8 @@ package http
 import (
 	"fmt"
 	"io"
+	"net/url"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/goplus/llgo/c"
@@ -12,7 +14,7 @@ import (
 	"github.com/goplus/llgoexamples/rust/hyper"
 )
 
-type ConnData struct {
+type connData struct {
 	TcpHandle     libuv.Tcp
 	ConnectReq    libuv.Connect
 	ReadBuf       libuv.Buf
@@ -24,20 +26,21 @@ type ConnData struct {
 }
 
 type Transport struct {
+	altProto atomic.Value // of nil or map[string]RoundTripper, key is URI scheme
 }
 
-// TaskId The unique identifier of the next task polled from the executor
-type TaskId c.Int
+// taskId The unique identifier of the next task polled from the executor
+type taskId c.Int
 
 const (
-	NotSet TaskId = iota
-	Send
-	ReceiveResp
-	ReceiveRespBody
+	notSet taskId = iota
+	sending
+	receiveResp
+	receiveRespBody
 )
 
 const (
-	DefaultHTTPPort = "80"
+	defaultHTTPPort = "80"
 )
 
 var DefaultTransport RoundTripper = &Transport{}
@@ -54,7 +57,7 @@ type persistConn struct {
 	//nwrite  int64               // bytes written
 	//writech chan writeRequest   // written by roundTrip; read by writeLoop
 	//closech chan struct{}       // closed when conn closed
-	conn      *ConnData
+	conn      *connData
 	t         *Transport
 	reqch     chan requestAndChan // written by roundTrip; read by readLoop
 	cancelch  chan freeChan
@@ -82,7 +85,7 @@ type responseAndError struct {
 
 type connAndTimeoutChan struct {
 	_         incomparable
-	conn      *ConnData
+	conn      *connData
 	timeoutch chan struct{}
 }
 
@@ -105,29 +108,29 @@ func (t *Transport) RoundTrip(req *Request) (*Response, error) {
 }
 
 func (t *Transport) getConn(req *Request) (pconn *persistConn, err error) {
-	host := req.Host
+	host := req.URL.Hostname()
 	port := req.URL.Port()
 	if port == "" {
 		// Hyper only supports http
-		port = DefaultHTTPPort
+		port = defaultHTTPPort
 	}
 	loop := libuv.DefaultLoop()
 	//conn := (*ConnData)(c.Calloc(1, unsafe.Sizeof(ConnData{})))
-	conn := new(ConnData)
+	conn := new(connData)
 	if conn == nil {
 		return nil, fmt.Errorf("Failed to allocate memory for conn_data\n")
 	}
 
 	// If timeout is set, start the timer
 	timeoutch := make(chan struct{}, 1)
-	if req.timeout != 0 {
+	if req.timeout > 0 {
 		libuv.InitTimer(loop, &conn.TimeoutTimer)
 		ct := &connAndTimeoutChan{
 			conn:      conn,
 			timeoutch: timeoutch,
 		}
 		(*libuv.Handle)(c.Pointer(&conn.TimeoutTimer)).SetData(c.Pointer(ct))
-		conn.TimeoutTimer.Start(OnTimeout, uint64(req.timeout.Milliseconds()), 0)
+		conn.TimeoutTimer.Start(onTimeout, uint64(req.timeout.Milliseconds()), 0)
 	}
 
 	libuv.InitTcp(loop, &conn.TcpHandle)
@@ -148,7 +151,7 @@ func (t *Transport) getConn(req *Request) (pconn *persistConn, err error) {
 
 	//conn.ConnectReq.Data = c.Pointer(conn)
 	(*libuv.Req)(c.Pointer(&conn.ConnectReq)).SetData(c.Pointer(conn))
-	status = libuv.TcpConnect(&conn.ConnectReq, &conn.TcpHandle, res.Addr, OnConnect)
+	status = libuv.TcpConnect(&conn.ConnectReq, &conn.TcpHandle, res.Addr, onConnect)
 	if status != 0 {
 		close(timeoutch)
 		return nil, fmt.Errorf("connect error: %s\n", c.GoString(libuv.Strerror(libuv.Errno(status))))
@@ -209,7 +212,7 @@ func (pc *persistConn) roundTrip(req *Request) (*Response, error) {
 // It processes incoming requests, sends them to the server, and handles responses.
 func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 	// Hookup the IO
-	hyperIo := NewIoWithConnReadWrite(pc.conn)
+	hyperIo := newIoWithConnReadWrite(pc.conn)
 
 	// We need an executor generally to poll futures
 	exec := hyper.NewExecutor()
@@ -218,7 +221,7 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 	opts.Exec(exec)
 
 	handshakeTask := hyper.Handshake(hyperIo, opts)
-	SetTaskId(handshakeTask, Send)
+	setTaskId(handshakeTask, sending)
 
 	// Let's wait for the handshake to finish...
 	exec.Push(handshakeTask)
@@ -241,13 +244,12 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 		default:
 			task := exec.Poll()
 			if task == nil {
-				//break
 				loop.Run(libuv.RUN_ONCE)
 				continue
 			}
-			switch (TaskId)(uintptr(task.Userdata())) {
-			case Send:
-				err := CheckTaskType(task, Send)
+			switch (taskId)(uintptr(task.Userdata())) {
+			case sending:
+				err := checkTaskType(task, sending)
 				if err != nil {
 					rc.ch <- responseAndError{err: err}
 					// Free the resources
@@ -269,7 +271,7 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 
 				// Send it!
 				sendTask := client.Send(hyperReq)
-				SetTaskId(sendTask, ReceiveResp)
+				setTaskId(sendTask, receiveResp)
 				sendRes := exec.Push(sendTask)
 				if sendRes != hyper.OK {
 					rc.ch <- responseAndError{err: fmt.Errorf("failed to send request")}
@@ -280,8 +282,8 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 
 				// For this example, no longer need the client
 				client.Free()
-			case ReceiveResp:
-				err := CheckTaskType(task, ReceiveResp)
+			case receiveResp:
+				err := checkTaskType(task, receiveResp)
 				if err != nil {
 					rc.ch <- responseAndError{err: err}
 					// Free the resources
@@ -309,19 +311,19 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 				// Response has been returned, stop the timer
 				pc.conn.IsCompleted = 1
 				// Stop the timer
-				if rc.req.timeout != 0 {
+				if rc.req.timeout > 0 {
 					pc.conn.TimeoutTimer.Stop()
 					(*libuv.Handle)(c.Pointer(&pc.conn.TimeoutTimer)).Close(nil)
 				}
 
 				dataTask := respBody.Data()
-				SetTaskId(dataTask, ReceiveRespBody)
+				setTaskId(dataTask, receiveRespBody)
 				exec.Push(dataTask)
 
 				// No longer need the response
 				hyperResp.Free()
-			case ReceiveRespBody:
-				err := CheckTaskType(task, ReceiveRespBody)
+			case receiveRespBody:
+				err := checkTaskType(task, receiveRespBody)
 				if err != nil {
 					rc.ch <- responseAndError{err: err}
 					// Free the resources
@@ -350,7 +352,7 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 					task.Free()
 
 					dataTask := respBody.Data()
-					SetTaskId(dataTask, ReceiveRespBody)
+					setTaskId(dataTask, receiveRespBody)
 					exec.Push(dataTask)
 
 					break
@@ -369,7 +371,7 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 				FreeResources(task, respBody, bodyWriter, exec, pc, rc)
 
 				alive = false
-			case NotSet:
+			case notSet:
 				// A background task for hyper_client completed...
 				task.Free()
 			}
@@ -378,24 +380,24 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 	//}
 }
 
-// OnConnect is the libuv callback for a successful connection
-func OnConnect(req *libuv.Connect, status c.Int) {
+// onConnect is the libuv callback for a successful connection
+func onConnect(req *libuv.Connect, status c.Int) {
 	//conn := (*ConnData)(req.Data)
 	//conn := (*struct{ data *ConnData })(c.Pointer(req)).data
-	conn := (*ConnData)((*libuv.Req)(c.Pointer(req)).GetData())
+	conn := (*connData)((*libuv.Req)(c.Pointer(req)).GetData())
 
 	if status < 0 {
 		c.Fprintf(c.Stderr, c.Str("connect error: %d\n"), libuv.Strerror(libuv.Errno(status)))
 		return
 	}
-	(*libuv.Stream)(c.Pointer(&conn.TcpHandle)).StartRead(AllocBuffer, OnRead)
+	(*libuv.Stream)(c.Pointer(&conn.TcpHandle)).StartRead(allocBuffer, onRead)
 }
 
-// AllocBuffer allocates a buffer for reading from a socket
-func AllocBuffer(handle *libuv.Handle, suggestedSize uintptr, buf *libuv.Buf) {
+// allocBuffer allocates a buffer for reading from a socket
+func allocBuffer(handle *libuv.Handle, suggestedSize uintptr, buf *libuv.Buf) {
 	//conn := (*ConnData)(handle.Data)
 	//conn := (*struct{ data *ConnData })(c.Pointer(handle)).data
-	conn := (*ConnData)(handle.GetData())
+	conn := (*connData)(handle.GetData())
 	if conn.ReadBuf.Base == nil {
 		conn.ReadBuf = libuv.InitBuf((*c.Char)(c.Malloc(suggestedSize)), c.Uint(suggestedSize))
 		//base := make([]byte, suggestedSize)
@@ -405,11 +407,11 @@ func AllocBuffer(handle *libuv.Handle, suggestedSize uintptr, buf *libuv.Buf) {
 	*buf = libuv.InitBuf((*c.Char)(c.Pointer(uintptr(c.Pointer(conn.ReadBuf.Base))+conn.ReadBufFilled)), c.Uint(suggestedSize-conn.ReadBufFilled))
 }
 
-// OnRead is the libuv callback for reading from a socket
+// onRead is the libuv callback for reading from a socket
 // This callback function is called when data is available to be read
-func OnRead(stream *libuv.Stream, nread c.Long, buf *libuv.Buf) {
+func onRead(stream *libuv.Stream, nread c.Long, buf *libuv.Buf) {
 	// Get the connection data associated with the stream
-	conn := (*ConnData)((*libuv.Handle)(c.Pointer(stream)).GetData())
+	conn := (*connData)((*libuv.Handle)(c.Pointer(stream)).GetData())
 	//conn := (*ConnData)(stream.Data)
 	//conn := (*struct{ data *ConnData })(c.Pointer(stream)).data
 
@@ -427,10 +429,10 @@ func OnRead(stream *libuv.Stream, nread c.Long, buf *libuv.Buf) {
 	}
 }
 
-// ReadCallBack read callback function for Hyper library
-func ReadCallBack(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen uintptr) uintptr {
+// readCallBack read callback function for Hyper library
+func readCallBack(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen uintptr) uintptr {
 	// Get the user data (connection data)
-	conn := (*ConnData)(userdata)
+	conn := (*connData)(userdata)
 
 	// If there's data in the buffer
 	if conn.ReadBufFilled > 0 {
@@ -462,11 +464,11 @@ func ReadCallBack(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen uin
 	return hyper.IoPending
 }
 
-// OnWrite is the libuv callback for writing to a socket
+// onWrite is the libuv callback for writing to a socket
 // Callback function called after a write operation completes
-func OnWrite(req *libuv.Write, status c.Int) {
+func onWrite(req *libuv.Write, status c.Int) {
 	// Get the connection data associated with the write request
-	conn := (*ConnData)((*libuv.Req)(c.Pointer(req)).GetData())
+	conn := (*connData)((*libuv.Req)(c.Pointer(req)).GetData())
 	//conn := (*ConnData)(req.Data)
 	//conn := (*struct{ data *ConnData })(c.Pointer(req)).data
 
@@ -479,10 +481,10 @@ func OnWrite(req *libuv.Write, status c.Int) {
 	}
 }
 
-// WriteCallBack write callback function for Hyper library
-func WriteCallBack(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen uintptr) uintptr {
+// writeCallBack write callback function for Hyper library
+func writeCallBack(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen uintptr) uintptr {
 	// Get the user data (connection data)
-	conn := (*ConnData)(userdata)
+	conn := (*connData)(userdata)
 	// Create a libuv buffer
 	initBuf := libuv.InitBuf((*c.Char)(c.Pointer(buf)), c.Uint(bufLen))
 	//req := (*libuv.Write)(c.Malloc(unsafe.Sizeof(libuv.Write{})))
@@ -492,7 +494,7 @@ func WriteCallBack(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen ui
 	//req.Data = c.Pointer(conn)
 
 	// Perform the asynchronous write operation
-	ret := req.Write((*libuv.Stream)(c.Pointer(&conn.TcpHandle)), &initBuf, 1, OnWrite)
+	ret := req.Write((*libuv.Stream)(c.Pointer(&conn.TcpHandle)), &initBuf, 1, onWrite)
 	// If the write operation was successfully initiated
 	if ret >= 0 {
 		// Return the number of bytes to be written
@@ -510,8 +512,8 @@ func WriteCallBack(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen ui
 	return hyper.IoPending
 }
 
-// OnTimeout is the libuv callback for a timeout
-func OnTimeout(handle *libuv.Timer) {
+// onTimeout is the libuv callback for a timeout
+func onTimeout(handle *libuv.Timer) {
 	ct := (*connAndTimeoutChan)((*libuv.Handle)(c.Pointer(handle)).GetData())
 	if ct.conn.IsCompleted != 1 {
 		ct.conn.IsCompleted = 1
@@ -521,25 +523,25 @@ func OnTimeout(handle *libuv.Timer) {
 	(*libuv.Handle)(c.Pointer(&ct.conn.TimeoutTimer)).Close(nil)
 }
 
-// NewIoWithConnReadWrite creates a new IO with read and write callbacks
-func NewIoWithConnReadWrite(connData *ConnData) *hyper.Io {
+// newIoWithConnReadWrite creates a new IO with read and write callbacks
+func newIoWithConnReadWrite(connData *connData) *hyper.Io {
 	hyperIo := hyper.NewIo()
 	hyperIo.SetUserdata(c.Pointer(connData))
-	hyperIo.SetRead(ReadCallBack)
-	hyperIo.SetWrite(WriteCallBack)
+	hyperIo.SetRead(readCallBack)
+	hyperIo.SetWrite(writeCallBack)
 	return hyperIo
 }
 
-// SetTaskId Set TaskId to the task's userdata as a unique identifier
-func SetTaskId(task *hyper.Task, userData TaskId) {
+// setTaskId Set taskId to the task's userdata as a unique identifier
+func setTaskId(task *hyper.Task, userData taskId) {
 	var data = userData
 	task.SetUserdata(unsafe.Pointer(uintptr(data)))
 }
 
-// CheckTaskType checks the task type
-func CheckTaskType(task *hyper.Task, curTaskId TaskId) error {
+// checkTaskType checks the task type
+func checkTaskType(task *hyper.Task, curTaskId taskId) error {
 	switch curTaskId {
-	case Send:
+	case sending:
 		if task.Type() == hyper.TaskError {
 			c.Printf(c.Str("handshake task error!\n"))
 			return Fail((*hyper.Error)(task.Value()))
@@ -548,7 +550,7 @@ func CheckTaskType(task *hyper.Task, curTaskId TaskId) error {
 			return fmt.Errorf("unexpected task type\n")
 		}
 		return nil
-	case ReceiveResp:
+	case receiveResp:
 		if task.Type() == hyper.TaskError {
 			c.Printf(c.Str("send task error!\n"))
 			return Fail((*hyper.Error)(task.Value()))
@@ -558,13 +560,13 @@ func CheckTaskType(task *hyper.Task, curTaskId TaskId) error {
 			return fmt.Errorf("unexpected task type\n")
 		}
 		return nil
-	case ReceiveRespBody:
+	case receiveRespBody:
 		if task.Type() == hyper.TaskError {
 			c.Printf(c.Str("body error!\n"))
 			return Fail((*hyper.Error)(task.Value()))
 		}
 		return nil
-	case NotSet:
+	case notSet:
 	}
 	return fmt.Errorf("unexpected TaskId\n")
 }
@@ -617,7 +619,7 @@ func CloseChannels(rc requestAndChan, pc *persistConn) {
 }
 
 // FreeConnData frees the connection data
-func FreeConnData(conn *ConnData) {
+func FreeConnData(conn *connData) {
 	if conn.ReadWaker != nil {
 		conn.ReadWaker.Free()
 		conn.ReadWaker = nil
@@ -630,4 +632,50 @@ func FreeConnData(conn *ConnData) {
 		c.Free(c.Pointer(conn.ReadBuf.Base))
 		conn.ReadBuf.Base = nil
 	}
+}
+
+type httpError struct {
+	err     string
+	timeout bool
+}
+
+func (e *httpError) Error() string   { return e.err }
+func (e *httpError) Timeout() bool   { return e.timeout }
+func (e *httpError) Temporary() bool { return true }
+
+var errTimeout error = &httpError{err: "net/http: timeout awaiting response headers", timeout: true}
+
+func nop() {}
+
+/*// alternateRoundTripper returns the alternate RoundTripper to use
+// for this request if the Request's URL scheme requires one,
+// or nil for the normal case of using the Transport.
+func (t *Transport) alternateRoundTripper(req *Request) RoundTripper {
+	if !t.useRegisteredProtocol(req) {
+		return nil
+	}
+	altProto, _ := t.altProto.Load().(map[string]RoundTripper)
+	return altProto[req.URL.Scheme]
+}
+
+// useRegisteredProtocol reports whether an alternate protocol (as registered
+// with Transport.RegisterProtocol) should be respected for this request.
+func (t *Transport) useRegisteredProtocol(req *Request) bool {
+	if req.URL.Scheme == "https" && req.requiresHTTP1() {
+		// If this request requires HTTP/1, don't use the
+		// "https" alternate protocol, which is used by the
+		// HTTP/2 code to take over requests if there's an
+		// existing cached HTTP/2 connection.
+		return false
+	}
+	return true
+}
+*/
+
+func idnaASCIIFromURL(url *url.URL) string {
+	addr := url.Hostname()
+	if v, err := idnaASCII(addr); err == nil {
+		addr = v
+	}
+	return addr
 }

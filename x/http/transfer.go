@@ -94,7 +94,7 @@ func readTransfer(msg any) (err error) {
 	}
 
 	// Trailer
-	t.Trailer, err = fixTrailer(t.Header, t.Chunked)
+	//t.Trailer, err = fixTrailer(t.Header, t.Chunked)
 
 	// If there is no Content-Length or chunked Transfer-Encoding on a *Response
 	// and the status is not 1xx, 204 or 304, then the body is unbounded.
@@ -148,7 +148,7 @@ func readTransfer(msg any) (err error) {
 			rr.TransferEncoding = []string{"chunked"}
 		}
 		rr.Close = t.Close
-		rr.Trailer = t.Trailer
+		//rr.Trailer = t.Trailer
 	}
 
 	return nil
@@ -174,7 +174,7 @@ func (t *transferReader) parseTransferEncoding() error {
 	if len(raw) != 1 {
 		return &unsupportedTEError{fmt.Sprintf("too many transfer encodings: %q", raw)}
 	}
-	if !equalFold(raw[0], "chunked") {
+	if !EqualFold(raw[0], "chunked") {
 		return &unsupportedTEError{fmt.Sprintf("unsupported transfer encoding: %q", raw[0])}
 	}
 
@@ -197,20 +197,6 @@ func (t *transferReader) parseTransferEncoding() error {
 
 func (t *transferReader) protoAtLeast(m, n int) bool {
 	return t.ProtoMajor > m || (t.ProtoMajor == m && t.ProtoMinor >= n)
-}
-
-// equalFold is strings.EqualFold, ASCII only. It reports whether s and t
-// are equal, ASCII-case-insensitively.
-func equalFold(s, t string) bool {
-	if len(s) != len(t) {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if lower(s[i]) != lower(t[i]) {
-			return false
-		}
-	}
-	return true
 }
 
 // Determine the expected body length, using RFC 7230 Section 3.3. This
@@ -341,21 +327,6 @@ func fixTrailer(header Header, chunked bool) (Header, error) {
 		return nil, nil
 	}
 	return trailer, nil
-}
-
-// splitTwoDigitNumber splits a two-digit number into two digits.
-func splitTwoDigitNumber(num int) (int, int) {
-	tens := num / 10
-	ones := num % 10
-	return tens, ones
-}
-
-// lower returns the ASCII lowercase version of b.
-func lower(b byte) byte {
-	if 'A' <= b && b <= 'Z' {
-		return b + ('a' - 'A')
-	}
-	return b
 }
 
 // foreachHeaderElement splits v according to the "#rule" construction
