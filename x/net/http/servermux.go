@@ -25,7 +25,7 @@ func (mux *ServeMux) Handler(r *Request) (h Handler, pattern string) {
 	mux.mu.RLock()
 	defer mux.mu.RUnlock()
 
-	h, pattern = mux.m[r.URL].h, r.URL
+	h, pattern = mux.m[r.URL.Path].h, r.URL.Path
 	if h == nil {
 		h, pattern = NotFoundHandler(), ""
 	}

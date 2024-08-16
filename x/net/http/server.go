@@ -29,15 +29,15 @@ type Server struct {
 	Addr    string
 	Handler Handler
 
-	uvLoop   *libuv.Loop
-	uvServer libuv.Tcp
+	uvLoop     *libuv.Loop
+	uvServer   libuv.Tcp
 	inShutdown atomic.Bool
 
 	mu                sync.Mutex
-	activeConnections map[*Conn]struct{}
+	activeConnections map[*conn]struct{}
 }
 
-type Conn struct {
+type conn struct {
 	Stream     *libuv.Tcp
 	PollHandle *libuv.Poll
 	EventMask  c.Uint
@@ -53,6 +53,11 @@ func NewServer(addr string) *Server {
 		Addr:    addr,
 		Handler: DefaultServeMux,
 	}
+}
+
+func ListenAndServe(addr string, handler Handler) error {
+	server := &Server{Addr: addr, Handler: handler}
+	return server.ListenAndServe()
 }
 
 func (srv *Server) ListenAndServe() error {
@@ -134,7 +139,7 @@ func (srv *Server) onNewConnection(serverStream *libuv.Stream, status c.Int) {
 }
 
 func (srv *Server) serverCallback(userdata unsafe.Pointer, hyperReq *hyper.Request, channel *hyper.ResponseChannel) {
-	conn := (*Conn)(userdata)
+	conn := (*conn)(userdata)
 
 	if hyperReq == nil {
 		fmt.Fprintf(os.Stderr, "Error: Received null request\n")
@@ -169,11 +174,11 @@ func (srv *Server) handleTask(task *hyper.Task) {
 	}
 }
 
-func (s *Server) trackConn(c *Conn, add bool) {
+func (s *Server) trackConn(c *conn, add bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.activeConnections == nil {
-		s.activeConnections = make(map[*Conn]struct{})
+		s.activeConnections = make(map[*conn]struct{})
 	}
 	if add {
 		s.activeConnections[c] = struct{}{}
@@ -193,7 +198,7 @@ func (srv *Server) Close() error {
 	return nil
 }
 
-func createIo(conn *Conn) *hyper.Io {
+func createIo(conn *conn) *hyper.Io {
 	io := hyper.NewIo()
 	io.SetUserdata(unsafe.Pointer(conn), freeConnData)
 	io.SetRead(readCb)
@@ -202,7 +207,7 @@ func createIo(conn *Conn) *hyper.Io {
 }
 
 func readCb(userdata unsafe.Pointer, ctx *hyper.Context, buf *byte, bufLen uintptr) uintptr {
-	conn := (*Conn)(userdata)
+	conn := (*conn)(userdata)
 	ret := net.Recv(conn.Stream.GetIoWatcherFd(), unsafe.Pointer(buf), bufLen, 0)
 
 	if ret >= 0 {
@@ -229,7 +234,7 @@ func readCb(userdata unsafe.Pointer, ctx *hyper.Context, buf *byte, bufLen uintp
 }
 
 func writeCb(userdata unsafe.Pointer, ctx *hyper.Context, buf *byte, bufLen uintptr) uintptr {
-	conn := (*Conn)(userdata)
+	conn := (*conn)(userdata)
 	ret := net.Send(conn.Stream.GetIoWatcherFd(), unsafe.Pointer(buf), bufLen, 0)
 
 	if ret >= 0 {
@@ -260,7 +265,7 @@ func onClose(handle *libuv.Handle) {
 }
 
 func onPoll(handle *libuv.Poll, status c.Int, events c.Int) {
-	conn := (*Conn)((*libuv.Handle)(unsafe.Pointer(handle)).GetData())
+	conn := (*conn)((*libuv.Handle)(unsafe.Pointer(handle)).GetData())
 
 	if status < 0 {
 		fmt.Fprintf(os.Stderr, "Poll error: %s\n", libuv.Strerror(libuv.Errno(status)))
@@ -278,7 +283,7 @@ func onPoll(handle *libuv.Poll, status c.Int, events c.Int) {
 	}
 }
 
-func updateConnRegistrations(conn *Conn, create bool) bool {
+func updateConnRegistrations(conn *conn, create bool) bool {
 	events := c.Int(0)
 	if conn.EventMask&c.Uint(libuv.READABLE) != 0 {
 		events |= c.Int(libuv.READABLE)
@@ -295,8 +300,8 @@ func updateConnRegistrations(conn *Conn, create bool) bool {
 	return true
 }
 
-func createConnData(loop *libuv.Loop, client *libuv.Tcp) *Conn {
-	conn := (*Conn)(c.Calloc(1, unsafe.Sizeof(Conn{})))
+func createConnData(loop *libuv.Loop, client *libuv.Tcp) *conn {
+	conn := (*conn)(c.Calloc(1, unsafe.Sizeof(conn{})))
 	if conn == nil {
 		fmt.Fprintf(os.Stderr, "Failed to allocate conn_data\n")
 		return nil
@@ -324,7 +329,7 @@ func createConnData(loop *libuv.Loop, client *libuv.Tcp) *Conn {
 }
 
 func freeConnData(userdata c.Pointer) {
-	conn := (*Conn)(userdata)
+	conn := (*conn)(userdata)
 	if conn != nil && conn.IsClosing == 0 {
 		conn.IsClosing = 1
 		// We don't immediately close the connection here.
