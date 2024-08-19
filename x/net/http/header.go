@@ -16,3 +16,7 @@ func (h Header) Get(key string) string {
 	}
 	return ""
 }
+
+func (h Header) Del(key string) {
+	delete(h, key)
+}

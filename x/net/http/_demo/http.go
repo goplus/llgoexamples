@@ -24,7 +24,7 @@ func main() {
 	http.HandleFunc("/echo", echoHandler)
 
 	fmt.Println("Starting server on :8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	if err := http.ListenAndServe("127.0.0.1:1234", nil); err != nil {
 		panic(err)
 	}
 }

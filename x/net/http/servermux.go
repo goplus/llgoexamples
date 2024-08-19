@@ -14,6 +14,7 @@ type muxEntry struct {
 	pattern string
 }
 
+// DefaultServeMux is the default [ServeMux] used by [Serve].
 var DefaultServeMux = &ServeMux{m: make(map[string]muxEntry)}
 
 func (mux *ServeMux) ServeHTTP(w ResponseWriter, r *Request) {
