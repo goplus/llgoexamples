@@ -45,7 +45,34 @@ type Request struct {
 
 var defaultChunkSize uintptr = 8192
 
-func NewRequest(method, urlStr string, body io.Reader) (*Request, error) {
+// NewRequest wraps NewRequestWithContext using context.Background.
+func NewRequest(method, url string, body io.Reader) (*Request, error) {
+	return NewRequestWithContext(context.Background(), method, url, body)
+}
+
+// NewRequestWithContext returns a new Request given a method, URL, and
+// optional body.
+//
+// If the provided body is also an io.Closer, the returned
+// Request.Body is set to body and will be closed by the Client
+// methods Do, Post, and PostForm, and Transport.RoundTrip.
+//
+// NewRequestWithContext returns a Request suitable for use with
+// Client.Do or Transport.RoundTrip. To create a request for use with
+// testing a Server Handler, either use the NewRequest function in the
+// net/http/httptest package, use ReadRequest, or manually update the
+// Request fields. For an outgoing client request, the context
+// controls the entire lifetime of a request and its response:
+// obtaining a connection, sending the request, and reading the
+// response headers and body. See the Request type's documentation for
+// the difference between inbound and outbound request fields.
+//
+// If body is of type *bytes.Buffer, *bytes.Reader, or
+// *strings.Reader, the returned request's ContentLength is set to its
+// exact value (instead of -1), GetBody is populated (so 307 and 308
+// redirects can replay the body), and Body is set to NoBody if the
+// ContentLength is 0.
+func NewRequestWithContext(ctx context.Context, method, urlStr string, body io.Reader) (*Request, error) {
 	if method == "" {
 		// We document that "" means "GET" for Request.Method, and people have
 		// relied on that from NewRequest, so keep that working.
@@ -69,7 +96,7 @@ func NewRequest(method, urlStr string, body io.Reader) (*Request, error) {
 	// The host's colon:port should be normalized. See Issue 14836.
 	u.Host = removeEmptyPort(u.Host)
 	req := &Request{
-		//ctx:        ctx,
+		ctx:        ctx,
 		Method:     method,
 		URL:        u,
 		Proto:      "HTTP/1.1",
@@ -131,10 +158,14 @@ func printInformational(userdata c.Pointer, resp *hyper.Response) {
 	fmt.Println("Informational (1xx): ", status)
 }
 
+type postReq struct {
+	req *Request
+	buf []byte
+}
+
 func setPostData(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
-	req := (*Request)(userdata)
-	buffer := make([]byte, defaultChunkSize)
-	n, err := req.Body.Read(buffer)
+	req := (*postReq)(userdata)
+	n, err := req.req.Body.Read(req.buf)
 	if err != nil {
 		if err == io.EOF {
 			*chunk = nil
@@ -144,7 +175,7 @@ func setPostData(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.In
 		return hyper.PollError
 	}
 	if n > 0 {
-		*chunk = hyper.CopyBuf(&buffer[0], uintptr(n))
+		*chunk = hyper.CopyBuf(&req.buf[0], uintptr(n))
 		return hyper.PollReady
 	}
 	if n == 0 {
@@ -152,7 +183,41 @@ func setPostData(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.In
 		return hyper.PollReady
 	}
 
-	fmt.Printf("error reading upload file: %s\n", c.GoString(c.Strerror(os.Errno)))
+	fmt.Printf("error reading request body: %s\n", c.GoString(c.Strerror(os.Errno)))
+	return hyper.PollError
+}
+
+func setPostDataNoCopy(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
+	type buf struct {
+		data   *uint8
+		len    uintptr
+		Unused [16]byte
+	}
+	req := (*postReq)(userdata)
+	buffer := &buf{
+		data: &req.buf[0],
+		len:  uintptr(len(req.buf)),
+	}
+
+	*chunk = (*hyper.Buf)(c.Pointer(buffer))
+	n, err := req.req.Body.Read(req.buf)
+	if err != nil {
+		if err == io.EOF {
+			*chunk = nil
+			return hyper.PollReady
+		}
+		fmt.Println("error reading upload file: ", err)
+		return hyper.PollError
+	}
+	if n > 0 {
+		return hyper.PollReady
+	}
+	if n == 0 {
+		*chunk = nil
+		return hyper.PollReady
+	}
+
+	fmt.Printf("error reading request body: %s\n", c.GoString(c.Strerror(os.Errno)))
 	return hyper.PollError
 }
 
@@ -180,7 +245,11 @@ func newHyperRequest(req *Request) (*hyper.Request, error) {
 		hyperReq.OnInformational(printInformational, nil)
 
 		hyperReqBody := hyper.NewBody()
-		hyperReqBody.SetUserdata(c.Pointer(req))
+		reqData := &postReq{
+			req: req,
+			buf: make([]byte, 3),
+		}
+		hyperReqBody.SetUserdata(c.Pointer(reqData))
 		hyperReqBody.SetDataFunc(setPostData)
 		hyperReq.SetBody(hyperReqBody)
 	}

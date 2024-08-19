@@ -68,6 +68,14 @@ func (c *Client) Post(url, contentType string, body io.Reader) (resp *Response, 
 	return c.Do(req)
 }
 
+func PostForm(url string, data url.Values) (resp *Response, err error) {
+	return DefaultClient.PostForm(url, data)
+}
+
+func (c *Client) PostForm(url string, data url.Values) (resp *Response, err error) {
+	return c.Post(url, "application/x-www-form-urlencoded", strings.NewReader(data.Encode()))
+}
+
 func (c *Client) Do(req *Request) (*Response, error) {
 	return c.do(req)
 }
@@ -474,7 +482,6 @@ func setRequestCancel(req *Request, rt RoundTripper, deadline time.Time) (stopTi
 	if deadline.IsZero() {
 		return nop, alwaysFalse
 	}
-	// TODO(spongehah) todo: map[string]github.com/goplus/llgo/x/http.RoundTripper
 	//knownTransport := knownRoundTripperImpl(rt, req)
 	oldCtx := req.Context()
 
@@ -552,8 +559,7 @@ func timeBeforeContextDeadline(t time.Time, ctx context.Context) bool {
 	return t.Before(d)
 }
 
-/*
-// knownRoundTripperImpl reports whether rt is a RoundTripper that's
+/*// knownRoundTripperImpl reports whether rt is a RoundTripper that's
 // maintained by the Go team and known to implement the latest
 // optional semantics (notably contexts). The Request is used
 // to check whether this particular request is using an alternate protocol,

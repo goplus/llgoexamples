@@ -94,6 +94,93 @@ func IsTokenRune(r rune) bool { // httpguts.IsTokenRune
 	return i < len(isTokenTable) && isTokenTable[i]
 }
 
+// ValidHeaderFieldName reports whether v is a valid HTTP/1.x header name.
+// HTTP/2 imposes the additional restriction that uppercase ASCII
+// letters are not allowed.
+//
+// RFC 7230 says:
+//
+//	header-field   = field-name ":" OWS field-value OWS
+//	field-name     = token
+//	token          = 1*tchar
+//	tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
+//	        "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+func ValidHeaderFieldName(v string) bool { // httpguts.ValidHeaderFieldName
+	if len(v) == 0 {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		if !isTokenTable[v[i]] {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidHeaderFieldValue reports whether v is a valid "field-value" according to
+// http://www.w3.org/Protocols/rfc2616/rfc2616-sec4.html#sec4.2 :
+//
+//	message-header = field-name ":" [ field-value ]
+//	field-value    = *( field-content | LWS )
+//	field-content  = <the OCTETs making up the field-value
+//	                 and consisting of either *TEXT or combinations
+//	                 of token, separators, and quoted-string>
+//
+// http://www.w3.org/Protocols/rfc2616/rfc2616-sec2.html#sec2.2 :
+//
+//	TEXT           = <any OCTET except CTLs,
+//	                  but including LWS>
+//	LWS            = [CRLF] 1*( SP | HT )
+//	CTL            = <any US-ASCII control character
+//	                 (octets 0 - 31) and DEL (127)>
+//
+// RFC 7230 says:
+//
+//	field-value    = *( field-content / obs-fold )
+//	obj-fold       =  N/A to http2, and deprecated
+//	field-content  = field-vchar [ 1*( SP / HTAB ) field-vchar ]
+//	field-vchar    = VCHAR / obs-text
+//	obs-text       = %x80-FF
+//	VCHAR          = "any visible [USASCII] character"
+//
+// http2 further says: "Similarly, HTTP/2 allows header field values
+// that are not valid. While most of the values that can be encoded
+// will not alter header field parsing, carriage return (CR, ASCII
+// 0xd), line feed (LF, ASCII 0xa), and the zero character (NUL, ASCII
+// 0x0) might be exploited by an attacker if they are translated
+// verbatim. Any request or response that contains a character not
+// permitted in a header field value MUST be treated as malformed
+// (Section 8.1.2.6). Valid characters are defined by the
+// field-content ABNF rule in Section 3.2 of [RFC7230]."
+//
+// This function does not (yet?) properly handle the rejection of
+// strings that begin or end with SP or HTAB.
+func ValidHeaderFieldValue(v string) bool { // httpguts.ValidHeaderFieldValue
+	for i := 0; i < len(v); i++ {
+		b := v[i]
+		if isCTL(b) && !isLWS(b) {
+			return false
+		}
+	}
+	return true
+}
+
+// isLWS reports whether b is linear white space, according
+// to http://www.w3.org/Protocols/rfc2616/rfc2616-sec2.html#sec2.2
+//
+//	LWS            = [CRLF] 1*( SP | HT )
+func isLWS(b byte) bool { return b == ' ' || b == '\t' } // httpguts.isLWS
+
+// isCTL reports whether b is a control byte, according
+// to http://www.w3.org/Protocols/rfc2616/rfc2616-sec2.html#sec2.2
+//
+//	CTL            = <any US-ASCII control character
+//	                 (octets 0 - 31) and DEL (127)>
+func isCTL(b byte) bool { // httpguts.isCTL
+	const del = 0x7f // a CTL
+	return b < ' ' || b == del
+}
+
 // IsPrint returns whether s is ASCII and printable according to
 // https://tools.ietf.org/html/rfc20#section-4.2.
 func IsPrint(s string) bool { // ascii.IsPrint
