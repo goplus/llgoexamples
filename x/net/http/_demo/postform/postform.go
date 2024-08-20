@@ -5,7 +5,7 @@ import (
 	"io"
 	"net/url"
 
-	"github.com/goplus/llgo/x/net/http"
+	"github.com/goplus/llgoexamples/x/net/http"
 )
 
 func main() {

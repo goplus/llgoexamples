@@ -10,7 +10,7 @@ import (
 
 func main() {
 	url := "http://httpbin.org/post"
-	filePath := "/Users/spongehah/go/src/llgo/x/http/_demo/upload/example.txt" // Replace with your file path
+	filePath := "/Users/spongehah/go/src/llgo/x/net/http/_demo/upload/example.txt" // Replace with your file path
 
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -19,7 +19,15 @@ func main() {
 	}
 	defer file.Close()
 
-	resp, err := http.Post(url, "application/octet-stream", file)
+	client := &http.Client{}
+	req, err := http.NewRequest("POST", url, file)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	req.Header.Set("expect", "100-continue")
+	resp, err := client.Do(req)
+
 	if err != nil {
 		fmt.Println(err)
 		return

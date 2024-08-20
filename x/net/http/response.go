@@ -82,3 +82,10 @@ func fixPragmaCacheControl(header Header) {
 func (r *Response) Cookies() []*Cookie {
 	return readSetCookies(r.Header)
 }
+
+// isProtocolSwitchHeader reports whether the request or response header
+// is for a protocol switch.
+func isProtocolSwitchHeader(h Header) bool {
+	return h.Get("Upgrade") != "" &&
+		HeaderValuesContainsToken(h["Connection"], "Upgrade")
+}

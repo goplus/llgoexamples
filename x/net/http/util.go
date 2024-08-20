@@ -181,6 +181,31 @@ func isCTL(b byte) bool { // httpguts.isCTL
 	return b < ' ' || b == del
 }
 
+// HeaderValuesContainsToken reports whether any string in values
+// contains the provided token, ASCII case-insensitively.
+func HeaderValuesContainsToken(values []string, token string) bool { // httpguts.HeaderValuesContainsToken
+	for _, v := range values {
+		if headerValueContainsToken(v, token) {
+			return true
+		}
+	}
+	return false
+}
+
+// headerValueContainsToken reports whether v (assumed to be a
+// 0#element, in the ABNF extension described in RFC 7230 section 7)
+// contains token amongst its comma-separated tokens, ASCII
+// case-insensitively.
+func headerValueContainsToken(v string, token string) bool { // httpguts.headerValueContainsToken
+	for comma := strings.IndexByte(v, ','); comma != -1; comma = strings.IndexByte(v, ',') {
+		if tokenEqual(trimOWS(v[:comma]), token) {
+			return true
+		}
+		v = v[comma+1:]
+	}
+	return tokenEqual(trimOWS(v), token)
+}
+
 // IsPrint returns whether s is ASCII and printable according to
 // https://tools.ietf.org/html/rfc20#section-4.2.
 func IsPrint(s string) bool { // ascii.IsPrint

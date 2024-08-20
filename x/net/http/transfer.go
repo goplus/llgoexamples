@@ -388,31 +388,6 @@ func shouldClose(major, minor int, header Header, removeCloseHeader bool) bool {
 	return hasClose
 }
 
-// HeaderValuesContainsToken reports whether any string in values
-// contains the provided token, ASCII case-insensitively.
-func HeaderValuesContainsToken(values []string, token string) bool {
-	for _, v := range values {
-		if headerValueContainsToken(v, token) {
-			return true
-		}
-	}
-	return false
-}
-
-// headerValueContainsToken reports whether v (assumed to be a
-// 0#element, in the ABNF extension described in RFC 7230 section 7)
-// contains token amongst its comma-separated tokens, ASCII
-// case-insensitively.
-func headerValueContainsToken(v string, token string) bool {
-	for comma := strings.IndexByte(v, ','); comma != -1; comma = strings.IndexByte(v, ',') {
-		if tokenEqual(trimOWS(v[:comma]), token) {
-			return true
-		}
-		v = v[comma+1:]
-	}
-	return tokenEqual(trimOWS(v), token)
-}
-
 // tokenEqual reports whether t1 and t2 are equal, ASCII case-insensitively.
 func tokenEqual(t1, t2 string) bool {
 	if len(t1) != len(t2) {

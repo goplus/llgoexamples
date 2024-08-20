@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/textproto"
@@ -73,6 +74,16 @@ func NewRequest(method, url string, body io.Reader) (*Request, error) {
 // redirects can replay the body), and Body is set to NoBody if the
 // ContentLength is 0.
 func NewRequestWithContext(ctx context.Context, method, urlStr string, body io.Reader) (*Request, error) {
+	// TODO(spongehah) Hyper only supports http
+	isHttpPrefix := strings.HasPrefix(urlStr, "http://")
+	isHttpsPrefix := strings.HasPrefix(urlStr, "https://")
+	if !isHttpPrefix && !isHttpsPrefix {
+		urlStr = "http://" + urlStr
+	}
+	if isHttpsPrefix {
+		urlStr = "http://" + strings.TrimPrefix(urlStr, "https://")
+	}
+
 	if method == "" {
 		// We document that "" means "GET" for Request.Method, and people have
 		// relied on that from NewRequest, so keep that working.
@@ -82,9 +93,9 @@ func NewRequestWithContext(ctx context.Context, method, urlStr string, body io.R
 	if !validMethod(method) {
 		return nil, fmt.Errorf("net/http: invalid method %q", method)
 	}
-	//if ctx == nil {
-	//	return nil, errors.New("net/http: nil Context")
-	//}
+	if ctx == nil {
+		return nil, errors.New("net/http: nil Context")
+	}
 	u, err := url.Parse(urlStr)
 	if err != nil {
 		return nil, err
@@ -241,8 +252,10 @@ func newHyperRequest(req *Request) (*hyper.Request, error) {
 	}
 
 	if method == "POST" && req.Body != nil {
-		req.Header.Set("expect", "100-continue")
-		hyperReq.OnInformational(printInformational, nil)
+		// 100-continue
+		if req.ProtoAtLeast(1, 1) && req.Body != nil && req.expectsContinue() {
+			hyperReq.OnInformational(printInformational, nil)
+		}
 
 		hyperReqBody := hyper.NewBody()
 		reqData := &postReq{
@@ -283,6 +296,17 @@ func (req *Request) setHeaders(hyperReq *hyper.Request) error {
 		}
 	}
 	return nil
+}
+
+func (r *Request) expectsContinue() bool {
+	return hasToken(r.Header.get("Expect"), "100-continue")
+}
+
+func (r *Request) wantsClose() bool {
+	if r.Close {
+		return true
+	}
+	return hasToken(r.Header.get("Connection"), "close")
 }
 
 func (r *Request) closeBody() error {
@@ -353,6 +377,14 @@ func (r *Request) requiresHTTP1() bool {
 func (r *Request) Cookies() []*Cookie {
 	return readCookies(r.Header, "")
 }
+
+// ProtoAtLeast reports whether the HTTP protocol used
+// in the request is at least major.minor.
+func (r *Request) ProtoAtLeast(major, minor int) bool {
+	return r.ProtoMajor > major ||
+		r.ProtoMajor == major && r.ProtoMinor >= minor
+}
+
 
 // readCookies parses all "Cookie" values from the header h and
 // returns the successfully parsed Cookies.
