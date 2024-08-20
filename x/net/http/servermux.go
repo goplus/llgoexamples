@@ -1,6 +1,7 @@
 package http
 
 import (
+	"fmt"
 	"sync"
 )
 
@@ -18,6 +19,7 @@ type muxEntry struct {
 var DefaultServeMux = &ServeMux{m: make(map[string]muxEntry)}
 
 func (mux *ServeMux) ServeHTTP(w ResponseWriter, r *Request) {
+	fmt.Printf("ServeHTTP called\n")
 	h, _ := mux.Handler(r)
 	h.ServeHTTP(w, r)
 }

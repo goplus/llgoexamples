@@ -28,24 +28,47 @@ type Request struct {
 	timeout          time.Duration
 }
 
-func newRequest(conn *conn, hyperReq *hyper.Request) (*Request, error) {
+func newRequest(ListenAddr string, conn *conn, hyperReq *hyper.Request) (*Request, error) {
 	method := make([]byte, 32)
-	methodLen := uintptr(len(method))
+	methodLen := unsafe.Sizeof(method)
 	if err := hyperReq.Method(&method[0], &methodLen); err != hyper.OK {
 		return nil, fmt.Errorf("failed to get method: %v", err)
 	}
 
 	methodStr := string(method[:methodLen])
+	fmt.Printf("Method: %s\n", methodStr)
 
 	var scheme, authority, pathAndQuery [1024]byte
-	schemeLen, authorityLen, pathAndQueryLen := uintptr(len(scheme)), uintptr(len(authority)), uintptr(len(pathAndQuery))
-	if err := hyperReq.URIParts(&scheme[0], &schemeLen, &authority[0], &authorityLen, &pathAndQuery[0], &pathAndQueryLen); err != hyper.OK {
-		return nil, fmt.Errorf("failed to get URI parts: %v", err)
+	schemeLen, authorityLen, pathAndQueryLen := unsafe.Sizeof(scheme), unsafe.Sizeof(authority), unsafe.Sizeof(pathAndQuery)
+	uriResult := hyperReq.URIParts(&scheme[0], &schemeLen, &authority[0], &authorityLen, &pathAndQuery[0], &pathAndQueryLen);
+	if uriResult != hyper.OK {
+		return nil, fmt.Errorf("failed to get URI parts: %v", uriResult)
 	}
+
+	var schemeStr, authorityStr, pathAndQueryStr string
+	if schemeLen == 0 {
+		schemeStr = "http"
+	} else {
+		schemeStr = string(scheme[:schemeLen])
+	}
+
+	if authorityLen == 0 {
+		authorityStr = ListenAddr
+	} else {
+		authorityStr = string(authority[:authorityLen])
+	}
+
+	if pathAndQueryLen == 0 {
+		return nil, fmt.Errorf("failed to get URI path and query: %v", uriResult)
+	} else {
+		pathAndQueryStr = string(pathAndQuery[:pathAndQueryLen])
+	}
+
 
 	var proto string
 	var protoMajor, protoMinor int
 	version := hyperReq.Version()
+	fmt.Printf("Version: %d\n", version)
 	switch version {
 	case hyper.HTTPVersion10:
 		proto = "HTTP/1.0"
@@ -67,26 +90,27 @@ func newRequest(conn *conn, hyperReq *hyper.Request) (*Request, error) {
 		return nil, fmt.Errorf("unknown HTTP version: %d", version)
 	}
 
-	urlStr := fmt.Sprintf("%s://%s%s", string(scheme[:schemeLen]), string(authority[:authorityLen]), string(pathAndQuery[:pathAndQueryLen]))
+	urlStr := fmt.Sprintf("%s://%s%s", schemeStr, authorityStr, pathAndQueryStr)
+	fmt.Printf("URL: %s\n", urlStr)
 	url, err := url.Parse(urlStr)
 	if err != nil {
 		return nil, err
 	}
 
-	req := &Request{
+	req := Request{
 		Method:     methodStr,
 		URL:        url,
 		Proto:      proto,
 		ProtoMajor: protoMajor,
 		ProtoMinor: protoMinor,
 		Header:     make(Header),
-		Host:       string(authority[:authorityLen]),
+		Host:       authorityStr,
 		timeout:    0,
 	}
 
 	headers := hyperReq.Headers()
 	if headers != nil {
-		headers.Foreach(addHeader, c.Pointer(req))
+		headers.Foreach(addHeader, unsafe.Pointer(&req))
 	} else {
 		return nil, fmt.Errorf("failed to get request headers")
 	}
@@ -94,10 +118,11 @@ func newRequest(conn *conn, hyperReq *hyper.Request) (*Request, error) {
 	if methodStr == "POST" || methodStr == "PUT" || methodStr == "PATCH" {
 		body := hyperReq.Body()
 		if body != nil {
-			var bodyWriter *io.PipeWriter
+			bodyWriter := new(io.PipeWriter)
 			req.Body, bodyWriter = io.Pipe()
 
-			task := body.Foreach(getBodyChunk, c.Pointer(bodyWriter), freeBodyWriter)
+
+			task := body.Foreach(getBodyChunk, c.Pointer(&bodyWriter), freeBodyWriter)
 			if task != nil {
 				r := conn.Executor.Push(task)
 				if r != hyper.OK {
@@ -113,7 +138,7 @@ func newRequest(conn *conn, hyperReq *hyper.Request) (*Request, error) {
 		}
 	}
 
-	return req, nil
+	return &req, nil
 }
 
 func addHeader(data unsafe.Pointer, name *byte, nameLen uintptr, value *byte, valueLen uintptr) c.Int {
@@ -132,6 +157,7 @@ func addHeader(data unsafe.Pointer, name *byte, nameLen uintptr, value *byte, va
 }
 
 func getBodyChunk(userdata c.Pointer, chunk *hyper.Buf) c.Int {
+	fmt.Printf("getBodyChunk called\n")
 	writer := (*io.PipeWriter)(userdata)
 	buf := chunk.Bytes()
 	len := chunk.Len()

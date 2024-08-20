@@ -13,7 +13,7 @@ func echoHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error reading request body", http.StatusInternalServerError)
 		return
 	}
-	defer r.Body.Close()
+	//defer r.Body.Close()
 
 	w.Header().Set("Content-Type", "text/plain")
 
@@ -23,8 +23,9 @@ func echoHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	http.HandleFunc("/echo", echoHandler)
 
-	fmt.Println("Starting server on :8080")
-	if err := http.ListenAndServe("127.0.0.1:1234", nil); err != nil {
+	fmt.Println("Starting server on :1234")
+	server := http.NewServer("127.0.0.1:1234")
+	if err := server.ListenAndServe(); err != nil {
 		panic(err)
 	}
 }

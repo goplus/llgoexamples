@@ -15,6 +15,7 @@ type response struct {
 	written    bool
 	body       []byte
 	channel    *hyper.ResponseChannel
+	resp       *hyper.Response
 }
 
 type body struct {
@@ -27,10 +28,12 @@ var DefaultChunkSize uintptr = 8192
 
 
 func newResponse(channel *hyper.ResponseChannel) *response {
-	return &response{
+	fmt.Printf("newResponse called\n")
+	resp := response{
 		header:  make(Header),
 		channel: channel,
 	}
+	return &resp
 }
 
 func (r *response) Header() Header {
@@ -46,22 +49,24 @@ func (r *response) Write(data []byte) (int, error) {
 }
 
 func (r *response) WriteHeader(statusCode int) {
+	fmt.Printf("WriteHeader called\n")
 	if r.written {
 		return
 	}
 	r.written = true
 	r.statusCode = statusCode
 
-	resp := hyper.NewResponse()
-	resp.SetStatus(uint16(statusCode))
+	newResp := hyper.NewResponse()
 
-	headers := resp.Headers()
+	newResp.SetStatus(uint16(statusCode))
+
+	headers := newResp.Headers()
 	for key, values := range r.header {
 		valueLen := len(values)
 		if valueLen > 1 {
 			for _, value := range values {
 				if headers.Add(&[]byte(key)[0], c.Strlen(c.AllocaCStr(key)), &[]byte(value)[0], c.Strlen(c.AllocaCStr(value))) != hyper.OK {
-					return 
+					return
 				}
 			}
 		} else if valueLen == 1 {
@@ -72,34 +77,45 @@ func (r *response) WriteHeader(statusCode int) {
 			return
 		}
 	}
-
-	r.channel.Send(resp)
+	r.resp = newResp
 }
 
 func (r *response) finalize() error {
+	fmt.Printf("finalize called\n")
 	if !r.written {
 		r.WriteHeader(200)
 	}
 
-	bodyData := &body{
+	bodyData := body{
 		data: r.body,
 		len: uintptr(len(r.body)),
 		readLen: 0,
 	}
+	fmt.Printf("bodyData constructed\n")
 
 	body := hyper.NewBody()
-	body.SetUserdata(unsafe.Pointer(bodyData), nil)
-
+	if body == nil {
+		return fmt.Errorf("failed to create body")
+	}
 	body.SetDataFunc(setBodyDataFunc)
+	body.SetUserdata(unsafe.Pointer(&bodyData), nil)
+	fmt.Printf("bodyData userdata set\n")
 
-	resp := hyper.NewResponse()
-	resp.SetBody(body)
+	fmt.Printf("bodyData set\n")
 
-	r.channel.Send(resp)
+	resBody := r.resp.SetBody(body)
+	if resBody != hyper.OK {
+		return fmt.Errorf("failed to set body")
+	}
+	fmt.Printf("body set\n")
+
+	r.channel.Send(r.resp)
+	fmt.Printf("response sent\n")
 	return nil
 }
 
 func setBodyDataFunc(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
+	fmt.Printf("setBodyDataFunc called\n")
 	body := (*body)(userdata)
 	if body.len > 0 {
 		if body.len > DefaultChunkSize {
