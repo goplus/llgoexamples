@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/goplus/llgoexamples/x/http"
+	"github.com/goplus/llgoexamples/x/net/http"
 )
 
 func main() {
-	resp, err := http.Get("https://www.baidu.com")
+	resp, err := http.Get("http://localhost:8080") // Start "../server/redirectServer.go" before running
 	if err != nil {
 		fmt.Println(err)
 		return

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/goplus/llgoexamples/x/http"
+	"github.com/goplus/llgoexamples/x/net/http"
 )
 
 func main() {
