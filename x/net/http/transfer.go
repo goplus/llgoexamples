@@ -367,7 +367,7 @@ func bodyAllowedForStatus(status int) bool {
 	return true
 }
 
-// Determine whether to hang up after sending a request and body, or
+// Determine whether to hang up after write a request and body, or
 // receiving a response and body
 // 'header' is the request headers.
 func shouldClose(major, minor int, header Header, removeCloseHeader bool) bool {

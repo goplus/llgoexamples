@@ -385,7 +385,6 @@ func (r *Request) ProtoAtLeast(major, minor int) bool {
 		r.ProtoMajor == major && r.ProtoMinor >= minor
 }
 
-
 // readCookies parses all "Cookie" values from the header h and
 // returns the successfully parsed Cookies.
 //
@@ -424,6 +423,11 @@ func readCookies(h Header, filter string) []*Cookie {
 	}
 	return cookies
 }
+
+// requestBodyReadError wraps an error from (*Request).write to indicate
+// that the error came from a Read call on the Request.Body.
+// This error type should not escape the net/http package to users.
+type requestBodyReadError struct{ error }
 
 func idnaASCII(v string) (string, error) {
 	// TODO: Consider removing this check after verifying performance is okay.

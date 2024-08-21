@@ -9,9 +9,9 @@ import (
 
 func main() {
 	client := &http.Client{
-		//Transport: &http.Transport{
-		//	MaxConnsPerHost: 2,
-		//},
+		Transport: &http.Transport{
+			MaxConnsPerHost: 2,
+		},
 	}
 	req, err := http.NewRequest("GET", "https://www.baidu.com", nil)
 	resp, err := client.Do(req)

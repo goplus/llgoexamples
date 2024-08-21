@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"unsafe"
 
 	"github.com/goplus/llgo/c"
 	"github.com/goplus/llgoexamples/rust/hyper"
@@ -63,6 +64,19 @@ func readResponseLineAndHeader(resp *Response, hyperResp *hyper.Response) {
 	headers.Foreach(appendToResponseHeader, c.Pointer(resp))
 }
 
+// appendToResponseBody BodyForeachCallback function: Process the response body
+func appendToResponseBody(userdata c.Pointer, chunk *hyper.Buf) c.Int {
+	writer := (*io.PipeWriter)(userdata)
+	bufLen := chunk.Len()
+	bytes := unsafe.Slice(chunk.Bytes(), bufLen)
+	_, err := writer.Write(bytes)
+	if err != nil {
+		fmt.Println("Error writing to response body:", err)
+		return hyper.IterBreak
+	}
+	return hyper.IterContinue
+}
+
 // RFC 7234, section 5.4: Should treat
 //
 //	Pragma: no-cache
@@ -88,4 +102,16 @@ func (r *Response) Cookies() []*Cookie {
 func isProtocolSwitchHeader(h Header) bool {
 	return h.Get("Upgrade") != "" &&
 		HeaderValuesContainsToken(h["Connection"], "Upgrade")
+}
+
+// bodyIsWritable reports whether the Body supports writing. The
+// Transport returns Writable bodies for 101 Switching Protocols
+// responses.
+// The Transport uses this method to determine whether a persistent
+// connection is done being managed from its perspective. Once we
+// return a writable response body to a user, the net/http package is
+// done managing that connection.
+func (r *Response) bodyIsWritable() bool {
+	_, ok := r.Body.(io.Writer)
+	return ok
 }
