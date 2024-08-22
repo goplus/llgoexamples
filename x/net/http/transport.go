@@ -1,6 +1,7 @@
 package http
 
 import (
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -117,11 +118,6 @@ type connAndTimeoutChan struct {
 	timeoutch chan struct{}
 }
 
-type freeChan struct {
-	_      incomparable
-	freech chan struct{}
-}
-
 type readTrackingBody struct {
 	io.ReadCloser
 	didRead  bool
@@ -141,7 +137,7 @@ func (r *readTrackingBody) Close() error {
 // setupRewindBody returns a new request with a custom body wrapper
 // that can report whether the body needs rewinding.
 // This lets rewindBody avoid an error result when the request
-// does not have GetBody but the body hasn't been readRespLineAndHeader at all yet.
+// does not have GetBody but the body hasn't been read at all yet.
 func setupRewindBody(req *Request) *Request {
 	if req.Body == nil || req.Body == NoBody {
 		return req
@@ -267,6 +263,32 @@ func (t *Transport) useRegisteredProtocol(req *Request) bool {
 		return false
 	}
 	return true
+}
+
+// CancelRequest cancels an in-flight request by closing its connection.
+// CancelRequest should only be called after RoundTrip has returned.
+//
+// Deprecated: Use Request.WithContext to create a request with a
+// cancelable context instead. CancelRequest cannot cancel HTTP/2
+// requests.
+func (t *Transport) CancelRequest(req *Request) {
+	t.cancelRequest(cancelKey{req}, errRequestCanceled)
+}
+
+// Cancel an in-flight request, recording the error value.
+// Returns whether the request was canceled.
+func (t *Transport) cancelRequest(key cancelKey, err error) bool {
+	// This function must not return until the cancel func has completed.
+	// See: https://golang.org/issue/34658
+	t.reqMu.Lock()
+	defer t.reqMu.Unlock()
+	cancel := t.reqCanceler[key]
+	delete(t.reqCanceler, key)
+	if cancel != nil {
+		cancel(err)
+	}
+
+	return cancel != nil
 }
 
 // ----------------------------------------------------------
@@ -451,6 +473,8 @@ func (t *Transport) getConn(treq *transportRequest, cm connectMethod) (pc *persi
 	// TODO(spongehah) cancel(t.getConn)
 	//case <-req.Cancel:
 	//	return nil, errRequestCanceledConn
+	case <-treq.Request.timeoutch:
+		return nil, fmt.Errorf("request timeout\n")
 	//case <-req.Context().Done():
 	//	return nil, req.Context().Err()
 	case err := <-cancelc:
@@ -573,12 +597,8 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 		cacheKey:      cm.key(),
 		reqch:         make(chan requestAndChan, 1),
 		writech:       make(chan writeRequest, 1),
-		cancelch:      make(chan freeChan, 1),
-		timeoutch:     make(chan struct{}, 1),
 		closech:       make(chan struct{}, 1),
 		writeLoopDone: make(chan struct{}, 1),
-		//writech: make(chan writeRequest, 1),
-		//closech: make(chan struct{}),
 	}
 
 	//if cm.scheme() == "https" && t.hasCustomTLSDialer() {
@@ -675,9 +695,8 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 	//	}
 	//}
 
-	if conn.IsCompleted != 1 {
-		go pconn.readWriteLoop(libuv.DefaultLoop())
-	}
+	go pconn.readWriteLoop(libuv.DefaultLoop())
+
 	return pconn, nil
 }
 
@@ -699,7 +718,7 @@ func (t *Transport) dial(ctx context.Context, pconn *persistConn, cm connectMeth
 		libuv.InitTimer(loop, &conn.TimeoutTimer)
 		ct := &connAndTimeoutChan{
 			conn:      conn,
-			timeoutch: pconn.timeoutch,
+			timeoutch: treq.Request.timeoutch,
 		}
 		(*libuv.Handle)(c.Pointer(&conn.TimeoutTimer)).SetData(c.Pointer(ct))
 		conn.TimeoutTimer.Start(onTimeout, uint64(treq.timeout.Milliseconds()), 0)
@@ -716,14 +735,14 @@ func (t *Transport) dial(ctx context.Context, pconn *persistConn, cm connectMeth
 	var res *net.AddrInfo
 	status := net.Getaddrinfo(c.AllocaCStr(host), c.AllocaCStr(port), &hints, &res)
 	if status != 0 {
-		close(pconn.timeoutch)
+		close(treq.Request.timeoutch)
 		return nil, fmt.Errorf("getaddrinfo error\n")
 	}
 
 	(*libuv.Req)(c.Pointer(&conn.ConnectReq)).SetData(c.Pointer(conn))
 	status = libuv.TcpConnect(&conn.ConnectReq, &conn.TcpHandle, res.Addr, onConnect)
 	if status != 0 {
-		close(pconn.timeoutch)
+		close(treq.Request.timeoutch)
 		return nil, fmt.Errorf("connect error: %s\n", c.GoString(libuv.Strerror(libuv.Errno(status))))
 	}
 
@@ -781,7 +800,7 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 		req.extraHeaders().Set("Connection", "close")
 	}
 
-	gone := make(chan struct{})
+	gone := make(chan struct{}, 1)
 	defer close(gone)
 
 	defer func() {
@@ -799,7 +818,7 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 	// In Hyper, the writeLoop() and readLoop() are combined together --> readWriteLoop().
 	startBytesWritten := pc.nwrite
 	writeErrCh := make(chan error, 1)
-	pc.writech <- writeRequest{req, writeErrCh}
+	pc.writech <- writeRequest{req: req, ch: writeErrCh}
 
 	// Send the request to readWriteLoop().
 	resc := make(chan responseAndError, 1)
@@ -820,13 +839,6 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 	for {
 		testHookWaitResLoop()
 
-		// Determine whether timeout has occurred
-		if pc.conn.IsCompleted == 1 {
-			rc := <-pc.reqch // blocking
-			// Free the resources
-			freeResources(nil, nil, nil, nil, pc, rc)
-			return nil, fmt.Errorf("request timeout\n")
-		}
 		select {
 		case err := <-writeErrCh:
 			if debugRoundTrip {
@@ -855,23 +867,21 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 		//case <-respHeaderTimer:
 		case re := <-resc:
 			if (re.res == nil) == (re.err == nil) {
+				println(1)
 				return nil, fmt.Errorf("internal error: exactly one of res or err should be set; nil=%v", re.res == nil)
 			}
 			if debugRoundTrip {
+				println(2)
 				//req.logf("resc recv: %p, %T/%#v", re.res, re.err, re.err)
 			}
 			if re.err != nil {
+				println(3)
 				return nil, pc.mapRoundTripError(req, startBytesWritten, re.err)
 			}
 			return re.res, nil
 		// TODO(spongehah) cancel(pc.roundTrip)
 		//case <-cancelChan:
-		case <-pc.timeoutch:
-			freech := make(chan struct{}, 1)
-			pc.cancelch <- freeChan{
-				freech: freech,
-			}
-			<-freech
+		case <-req.Request.timeoutch:
 			return nil, fmt.Errorf("request timeout\n")
 		}
 	}
@@ -884,22 +894,17 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 
 	const debugReadWriteLoop = true // Debug switch provided for developers
 
+	if debugReadWriteLoop {
+		println("readWriteLoop start")
+	}
+
 	// The polling state machine!
 	// Poll all ready tasks and act on them...
 	alive := true
 	var bodyWriter *io.PipeWriter
+	var rw readWaiter
 	for alive {
 		select {
-		case fc := <-pc.cancelch:
-			if debugReadWriteLoop {
-				println("cancelch")
-			}
-			// Free the resources
-			//freeResources(nil, respBody, bodyWriter, pc.exec, pc, rc)
-			alive = false
-			pc.close(errors.New("timeout error"))
-			close(fc.freech)
-			return
 		case <-pc.closech:
 			if debugReadWriteLoop {
 				println("closech")
@@ -911,18 +916,22 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 				loop.Run(libuv.RUN_ONCE)
 				continue
 			}
-			switch (taskId)(uintptr(task.Userdata())) {
+			taskId := (taskId)(uintptr(task.Userdata()))
+			if debugReadWriteLoop {
+				println(taskId)
+			}
+			switch taskId {
 			case write:
 				if debugReadWriteLoop {
 					println("write")
 				}
-				wc := <-pc.writech // blocking
+				wr := <-pc.writech // blocking
 
 				startBytesWritten := pc.nwrite
 
 				err := checkTaskType(task, write)
 				if err != nil {
-					wc.ch <- err
+					wr.ch <- err
 					// Free the resources
 					//freeResources(task, respBody, bodyWriter, pc.exec, pc, rc)
 					pc.close(err)
@@ -933,7 +942,16 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 				task.Free()
 
 				// Prepare the hyper.Request
-				hyperReq, err := newHyperRequest(wc.req.Request)
+				hyperReq, err := newHyperRequest(wr.req.Request)
+				if err == nil {
+					// Send it!
+					sendTask := client.Send(hyperReq)
+					setTaskId(sendTask, read)
+					sendRes := pc.exec.Push(sendTask)
+					if sendRes != hyper.OK {
+						err = errors.New("failed to send the request")
+					}
+				}
 				if bre, ok := err.(requestBodyReadError); ok {
 					err = bre.error
 					// Errors reading from the user's
@@ -943,25 +961,14 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 					// pc.close() which tears down
 					// connections and causes other
 					// errors.
-					wc.req.setError(err)
+					wr.req.setError(err)
 				}
 				if err != nil {
 					if pc.nwrite == startBytesWritten {
 						err = nothingWrittenError{err}
 					}
-					wc.ch <- err
-					// Free the resources
-					//freeResources(task, respBody, bodyWriter, pc.exec, pc, rc)
-					pc.close(err)
-					return
-				}
-
-				// Send it!
-				sendTask := client.Send(hyperReq)
-				setTaskId(sendTask, readRespLineAndHeader)
-				sendRes := pc.exec.Push(sendTask)
-				if sendRes != hyper.OK {
-					wc.ch <- err
+					//pc.writeErrCh <- err // to the body reader, which might recycle us
+					wr.ch <- err // to the roundTrip function
 					// Free the resources
 					//freeResources(task, respBody, bodyWriter, pc.exec, pc, rc)
 					pc.close(err)
@@ -970,10 +977,14 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 
 				// For this example, no longer need the client
 				client.Free()
-			case readRespLineAndHeader:
 				if debugReadWriteLoop {
-					println("readRespLineAndHeader")
+					println("write end")
 				}
+			case read:
+				if debugReadWriteLoop {
+					println("read")
+				}
+
 				rc := <-pc.reqch // blocking
 
 				closeErr := errReadLoopExiting // default value, if not changed below
@@ -997,6 +1008,12 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 				//	return true
 				//}
 
+				// eofc is used to block caller goroutines reading from Response.Body
+				// at EOF until this goroutines has (potentially) added the connection
+				// back to the idle pool.
+				eofc := make(chan struct{}, 1)
+				defer close(eofc) // unblock reader on errors
+
 				// Read this once, before loop starts. (to avoid races in tests)
 				testHookMu.Lock()
 				testHookReadLoopBeforeNextRead := testHookReadLoopBeforeNextRead
@@ -1010,7 +1027,7 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 				}
 				pc.mu.Unlock()
 
-				err := checkTaskType(task, readRespLineAndHeader)
+				err := checkTaskType(task, read)
 				// Take the results
 				hyperResp := (*hyper.Response)(task.Value())
 				task.Free()
@@ -1038,8 +1055,6 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 				}
 
 				// Response has been returned, stop the timer
-				pc.conn.IsCompleted = 1
-				// Stop the timer
 				if rc.req.timeout > 0 {
 					pc.conn.TimeoutTimer.Stop()
 					(*libuv.Handle)(c.Pointer(&pc.conn.TimeoutTimer)).Close(nil)
@@ -1091,24 +1106,71 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 					continue
 				}
 
+				waitForBodyRead := make(chan bool, 2)
+				body := &bodyEOFSignal{
+					body: resp.Body,
+					earlyCloseFn: func() error {
+						waitForBodyRead <- false
+						<-eofc // will be closed by deferred call at the end of the function
+						return nil
+					},
+					fn: func(err error) error {
+						isEOF := err == io.EOF
+						waitForBodyRead <- isEOF
+						if isEOF {
+							<-eofc // see comment above eofc declaration
+						} else if err != nil {
+							if cerr := pc.canceled(); cerr != nil {
+								return cerr
+							}
+						}
+						return err
+					},
+				}
+				resp.Body = body
+
+				// TODO(spongehah) gzip fail
+				if rc.addedGzip && EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+					resp.Body = &gzipReader{body: body}
+					resp.Header.Del("Content-Encoding")
+					resp.Header.Del("Content-Length")
+					resp.ContentLength = -1
+					resp.Uncompressed = true
+				}
+
+				rw.waitForBodyRead = waitForBodyRead
+				rw.rc = rc
+				rw.eofc = eofc
 				bodyForeachTask := respBody.Foreach(appendToResponseBody, c.Pointer(bodyWriter))
-				setTaskId(bodyForeachTask, readRespBody)
+				setTaskId(bodyForeachTask, readDone)
 				pc.exec.Push(bodyForeachTask)
 
+				// TODO(spongehah) select blocking
+				//select {
+				//case rc.ch <- responseAndError{res: resp}:
+				//case <-rc.callerGone:
+				//	return
+				//}
 				rc.ch <- responseAndError{res: resp}
 
 				// No longer need the response
 				hyperResp.Free()
-			case readRespBody:
+				if debugReadWriteLoop {
+					println("read end")
+				}
+
+				//pc.t.replaceReqCanceler(rc.cancelKey, nil)
+				//eofc <- struct{}{}
+			case readDone:
 				// A background task of reading the response body is completed
 				if debugReadWriteLoop {
-					println("readRespBody")
+					println("readDone")
 				}
-				err := checkTaskType(task, readRespBody)
+				err := checkTaskType(task, readDone)
 				if err != nil {
 					fmt.Println(err)
 					pc.close(err)
-					return
+					alive = false
 				}
 
 				if task.Type() != hyper.TaskEmpty {
@@ -1121,6 +1183,39 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 				// free the task
 				task.Free()
 				bodyWriter.Close()
+
+				// Before looping back to the top of this function and peeking on
+				// the bufio.Reader, wait for the caller goroutine to finish
+				// reading the response body. (or for cancellation or death)
+				rc := rw.rc
+				select {
+				//case bodyEOF := <-rw.waitForBodyRead:
+				case <-rw.waitForBodyRead:
+					//replaced := pc.t.replaceReqCanceler(rc.cancelKey, nil) // before pc might return to idle pool
+					pc.t.replaceReqCanceler(rc.cancelKey, nil) // before pc might return to idle pool
+					// TODO(spongehah) ConnPool(readWriteLoop)
+					//alive = alive &&
+					//	bodyEOF &&
+					//	!pc.sawEOF &&
+					//	pc.wroteRequest() &&
+					//	replaced && tryPutIdleConn(trace)
+
+					rw.eofc <- struct{}{}
+				// TODO(spongehah) cancel(pc.readWriteLoop)
+				//case <-rc.req.Cancel:
+				//	alive = false
+				//	pc.t.CancelRequest(rc.req)
+				//case <-rc.req.Context().Done():
+				//	alive = false
+				//	pc.t.cancelRequest(rc.cancelKey, rc.req.Context().Err())
+				case <-pc.closech:
+					alive = false
+				}
+
+				testHookReadLoopBeforeNextRead()
+				if debugReadWriteLoop {
+					println("readDone end")
+				}
 			case notSet:
 				// A background task for hyper_client completed...
 				task.Free()
@@ -1136,7 +1231,6 @@ type connData struct {
 	ConnectReq    libuv.Connect
 	ReadBuf       libuv.Buf
 	TimeoutTimer  libuv.Timer
-	IsCompleted   int
 	ReadBufFilled uintptr
 	ReadWaker     *hyper.Waker
 	WriteWaker    *hyper.Waker
@@ -1175,12 +1269,10 @@ func allocBuffer(handle *libuv.Handle, suggestedSize uintptr, buf *libuv.Buf) {
 }
 
 // onRead is the libuv callback for reading from a socket
-// This callback function is called when data is available to be readRespLineAndHeader
+// This callback function is called when data is available to be read
 func onRead(stream *libuv.Stream, nread c.Long, buf *libuv.Buf) {
 	// Get the connection data associated with the stream
 	conn := (*connData)((*libuv.Handle)(c.Pointer(stream)).GetData())
-	//conn := (*ConnData)(stream.Data)
-	//conn := (*struct{ data *ConnData })(c.Pointer(stream)).data
 
 	// If data was read (nread > 0)
 	if nread > 0 {
@@ -1196,7 +1288,7 @@ func onRead(stream *libuv.Stream, nread c.Long, buf *libuv.Buf) {
 	}
 }
 
-// readCallBack readRespLineAndHeader callback function for Hyper library
+// readCallBack read callback function for Hyper library
 func readCallBack(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen uintptr) uintptr {
 	// Get the user data (connection data)
 	conn := (*connData)(userdata)
@@ -1236,8 +1328,6 @@ func readCallBack(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen uin
 func onWrite(req *libuv.Write, status c.Int) {
 	// Get the connection data associated with the write request
 	conn := (*connData)((*libuv.Req)(c.Pointer(req)).GetData())
-	//conn := (*ConnData)(req.Data)
-	//conn := (*struct{ data *ConnData })(c.Pointer(req)).data
 
 	// If there's a pending write waker
 	if conn.WriteWaker != nil {
@@ -1254,11 +1344,9 @@ func writeCallBack(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen ui
 	conn := (*connData)(userdata)
 	// Create a libuv buffer
 	initBuf := libuv.InitBuf((*c.Char)(c.Pointer(buf)), c.Uint(bufLen))
-	//req := (*libuv.Write)(c.Malloc(unsafe.Sizeof(libuv.Write{})))
 	req := &libuv.Write{}
 	// Associate the connection data with the write request
 	(*libuv.Req)(c.Pointer(req)).SetData(c.Pointer(conn))
-	//req.Data = c.Pointer(conn)
 
 	// Perform the asynchronous write operation
 	ret := req.Write((*libuv.Stream)(c.Pointer(&conn.TcpHandle)), &initBuf, 1, onWrite)
@@ -1282,15 +1370,12 @@ func writeCallBack(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen ui
 // onTimeout is the libuv callback for a timeout
 func onTimeout(handle *libuv.Timer) {
 	ct := (*connAndTimeoutChan)((*libuv.Handle)(c.Pointer(handle)).GetData())
-	if ct.conn.IsCompleted != 1 {
-		ct.conn.IsCompleted = 1
-		ct.timeoutch <- struct{}{}
-	}
+	close(ct.timeoutch)
 	// Close the timer
 	(*libuv.Handle)(c.Pointer(&ct.conn.TimeoutTimer)).Close(nil)
 }
 
-// newIoWithConnReadWrite creates a new IO with readRespLineAndHeader and write callbacks
+// newIoWithConnReadWrite creates a new IO with read and write callbacks
 func newIoWithConnReadWrite(connData *connData) *hyper.Io {
 	hyperIo := hyper.NewIo()
 	hyperIo.SetUserdata(c.Pointer(connData))
@@ -1305,9 +1390,15 @@ type taskId c.Int
 const (
 	notSet taskId = iota
 	write
-	readRespLineAndHeader
-	readRespBody
+	read
+	readDone
 )
+
+type readWaiter struct {
+	rc              requestAndChan
+	waitForBodyRead chan bool
+	eofc            chan struct{}
+}
 
 // setTaskId Set taskId to the task's userdata as a unique identifier
 func setTaskId(task *hyper.Task, userData taskId) {
@@ -1327,9 +1418,9 @@ func checkTaskType(task *hyper.Task, curTaskId taskId) error {
 			return fmt.Errorf("unexpected task type\n")
 		}
 		return nil
-	case readRespLineAndHeader:
+	case read:
 		if task.Type() == hyper.TaskError {
-			c.Printf(c.Str("send task error!\n"))
+			c.Printf(c.Str("write task error!\n"))
 			return fail((*hyper.Error)(task.Value()))
 		}
 		if task.Type() != hyper.TaskResponse {
@@ -1337,9 +1428,9 @@ func checkTaskType(task *hyper.Task, curTaskId taskId) error {
 			return fmt.Errorf("unexpected task type\n")
 		}
 		return nil
-	case readRespBody:
+	case readDone:
 		if task.Type() == hyper.TaskError {
-			c.Printf(c.Str("body error!\n"))
+			c.Printf(c.Str("read error!\n"))
 			return fail((*hyper.Error)(task.Value()))
 		}
 		return nil
@@ -1391,8 +1482,6 @@ func closeChannels(rc requestAndChan, pc *persistConn) {
 	// Closing the channel
 	close(rc.ch)
 	close(pc.reqch)
-	close(pc.timeoutch)
-	close(pc.cancelch)
 }
 
 // freeConnData frees the connection data
@@ -1475,7 +1564,7 @@ func (nwe nothingWrittenError) Unwrap() error {
 }
 
 // transportReadFromServerError is used by Transport.readLoop when the
-// 1 byte peek readRespLineAndHeader fails and we're actually anticipating a response.
+// 1 byte peek read fails and we're actually anticipating a response.
 // Usually this is just due to the inherent keep-alive shut down race,
 // where the server closed the connection at the same time the client
 // wrote. The underlying err field is usually io.EOF or some
@@ -1546,13 +1635,10 @@ type persistConn struct {
 	cacheKey      connectMethodKey
 	conn          *connData
 	nwrite        int64               // bytes written
-	reqch         chan requestAndChan // written by roundTrip; readRespLineAndHeader by readWriteLoop
-	writech       chan writeRequest   // written by roundTrip; readRespLineAndHeader by writeLoop(Already merged into reqch)
+	reqch         chan requestAndChan // written by roundTrip; read by readWriteLoop
+	writech       chan writeRequest   // written by roundTrip; read by writeLoop(Already merged into reqch)
 	closech       chan struct{}       // closed when conn closed
 	writeLoopDone chan struct{}       // closed when write loop ends
-
-	cancelch  chan freeChan
-	timeoutch chan struct{}
 
 	isProxy              bool
 	mu                   sync.Mutex // guards following fields
@@ -1899,4 +1985,108 @@ func (q *wantConnQueue) cleanFront() (cleaned bool) {
 		q.popFront()
 		cleaned = true
 	}
+}
+
+// bodyEOFSignal is used by the HTTP/1 transport when reading response
+// bodies to make sure we see the end of a response body before
+// proceeding and reading on the connection again.
+//
+// It wraps a ReadCloser but runs fn (if non-nil) at most
+// once, right before its final (error-producing) Read or Close call
+// returns. fn should return the new error to return from Read or Close.
+//
+// If earlyCloseFn is non-nil and Close is called before io.EOF is
+// seen, earlyCloseFn is called instead of fn, and its return value is
+// the return value from Close.
+type bodyEOFSignal struct {
+	body         io.ReadCloser
+	mu           sync.Mutex        // guards following 4 fields
+	closed       bool              // whether Close has been called
+	rerr         error             // sticky Read error
+	fn           func(error) error // err will be nil on Read io.EOF
+	earlyCloseFn func() error      // optional alt Close func used if io.EOF not seen
+}
+
+var errReadOnClosedResBody = errors.New("http: read on closed response body")
+
+func (es *bodyEOFSignal) Read(p []byte) (n int, err error) {
+	es.mu.Lock()
+	closed, rerr := es.closed, es.rerr
+	es.mu.Unlock()
+	if closed {
+		return 0, errReadOnClosedResBody
+	}
+	if rerr != nil {
+		return 0, rerr
+	}
+
+	n, err = es.body.Read(p)
+	if err != nil {
+		es.mu.Lock()
+		defer es.mu.Unlock()
+		if es.rerr == nil {
+			es.rerr = err
+		}
+		err = es.condfn(err)
+	}
+	return
+}
+
+func (es *bodyEOFSignal) Close() error {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	if es.closed {
+		return nil
+	}
+	es.closed = true
+	if es.earlyCloseFn != nil && es.rerr != io.EOF {
+		return es.earlyCloseFn()
+	}
+	err := es.body.Close()
+	return es.condfn(err)
+}
+
+// caller must hold es.mu.
+func (es *bodyEOFSignal) condfn(err error) error {
+	if es.fn == nil {
+		return err
+	}
+	err = es.fn(err)
+	es.fn = nil
+	return err
+}
+
+// gzipReader wraps a response body so it can lazily
+// call gzip.NewReader on the first call to Read
+type gzipReader struct {
+	_    incomparable
+	body *bodyEOFSignal // underlying HTTP/1 response body framing
+	zr   *gzip.Reader   // lazily-initialized gzip reader
+	zerr error          // any error from gzip.NewReader; sticky
+}
+
+func (gz *gzipReader) Read(p []byte) (n int, err error) {
+	if gz.zr == nil {
+		if gz.zerr == nil {
+			gz.zr, gz.zerr = gzip.NewReader(gz.body)
+		}
+		if gz.zerr != nil {
+			return 0, gz.zerr
+		}
+	}
+
+	gz.body.mu.Lock()
+	if gz.body.closed {
+		err = errReadOnClosedResBody
+	}
+	gz.body.mu.Unlock()
+
+	if err != nil {
+		return 0, err
+	}
+	return gz.zr.Read(p)
+}
+
+func (gz *gzipReader) Close() error {
+	return gz.body.Close()
 }

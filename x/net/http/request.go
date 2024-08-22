@@ -38,7 +38,9 @@ type Request struct {
 	RemoteAddr string
 	RequestURI string
 	//TLS              *tls.ConnectionState
-	Cancel   <-chan struct{}
+	Cancel    <-chan struct{}
+	timeoutch chan struct{} //optional
+
 	Response *Response
 	timeout  time.Duration
 	ctx      context.Context

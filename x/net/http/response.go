@@ -21,6 +21,7 @@ type Response struct {
 	ContentLength    int64
 	TransferEncoding []string
 	Close            bool
+	Uncompressed     bool
 	//Trailer          Header
 	Request *Request
 }

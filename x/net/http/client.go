@@ -307,7 +307,9 @@ func send(ireq *Request, rt RoundTripper, deadline time.Time) (resp *Response, d
 	}
 
 	// TODO(spongehah) timeout
+	req.timeoutch = make(chan struct{}, 1)
 	//stopTimer, didTimeout := setRequestCancel(req, rt, deadline)
+
 	sub := deadline.Sub(time.Now())
 	req.timeout = sub
 	resp, err = rt.RoundTrip(req)
@@ -504,7 +506,7 @@ func setRequestCancel(req *Request, rt RoundTripper, deadline time.Time) (stopTi
 		req.ctx, cancelCtx = context.WithDeadline(oldCtx, deadline)
 	}
 
-	cancel := make(chan struct{})
+	cancel := make(chan struct{}, 1)
 	req.Cancel = cancel
 
 	doCancel := func() {
@@ -518,7 +520,7 @@ func setRequestCancel(req *Request, rt RoundTripper, deadline time.Time) (stopTi
 		}
 	}
 
-	stopTimerCh := make(chan struct{})
+	stopTimerCh := make(chan struct{}, 1)
 	var once sync.Once
 	stopTimer = func() {
 		once.Do(func() {
