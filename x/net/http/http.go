@@ -13,6 +13,17 @@ func isNotToken(r rune) bool {
 	return !IsTokenRune(r)
 }
 
+// stringContainsCTLByte reports whether s contains any ASCII control character.
+func stringContainsCTLByte(s string) bool {
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b < ' ' || b == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 // removeEmptyPort strips the empty port in ":port" to ""
 // as mandated by RFC 3986 Section 6.2.3.
 func removeEmptyPort(host string) string {

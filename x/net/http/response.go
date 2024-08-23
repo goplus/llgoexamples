@@ -32,7 +32,7 @@ func (r *Response) closeBody() {
 	}
 }
 
-func ReadResponse(hyperResp *hyper.Response, req *Request) (*Response, error) {
+func ReadResponse(r *io.PipeReader, req *Request, hyperResp *hyper.Response) (*Response, error) {
 	resp := &Response{
 		Request: req,
 		Header:  make(Header),
@@ -42,7 +42,7 @@ func ReadResponse(hyperResp *hyper.Response, req *Request) (*Response, error) {
 
 	fixPragmaCacheControl(req.Header)
 
-	err := readTransfer(resp)
+	err := readTransfer(resp, r)
 	if err != nil {
 		return nil, err
 	}
@@ -54,9 +54,9 @@ func readResponseLineAndHeader(resp *Response, hyperResp *hyper.Response) {
 	rp := hyperResp.ReasonPhrase()
 	rpLen := hyperResp.ReasonPhraseLen()
 
+	// Parse the first line of the response.
 	resp.Status = strconv.Itoa(int(hyperResp.Status())) + " " + c.GoString((*int8)(c.Pointer(rp)), rpLen)
 	resp.StatusCode = int(hyperResp.Status())
-
 	version := int(hyperResp.Version())
 	resp.ProtoMajor, resp.ProtoMinor = splitTwoDigitNumber(version)
 	resp.Proto = fmt.Sprintf("HTTP/%d.%d", resp.ProtoMajor, resp.ProtoMinor)

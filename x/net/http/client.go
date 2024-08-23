@@ -139,9 +139,7 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 				resp.closeBody()
 				return nil, uerr(fmt.Errorf("failed to parse Location header %q: %v", loc, err))
 			}
-			// TODO(spongehah) redirect: Why use host := ""
-			//host := ""
-			host := u.Host
+			host := ""
 
 			if req.Host != "" && req.Host != req.URL.Host {
 				// If the caller specified a custom Host header and the
@@ -239,7 +237,7 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 
 // didTimeout is non-nil only if err != nil.
 func (c *Client) send(req *Request, deadline time.Time) (resp *Response, didTimeout func() bool, err error) {
-	// TODO(spongehah) cookie
+	// TODO(spongehah) cookie(c.send)
 	if c.Jar != nil {
 		for _, cookie := range c.Jar.Cookies(req.URL) {
 			req.AddCookie(cookie)
@@ -306,7 +304,7 @@ func send(ireq *Request, rt RoundTripper, deadline time.Time) (resp *Response, d
 		forkReq()
 	}
 
-	// TODO(spongehah) timeout
+	// TODO(spongehah) timeout(send)
 	req.timeoutch = make(chan struct{}, 1)
 	//stopTimer, didTimeout := setRequestCancel(req, rt, deadline)
 

@@ -3,6 +3,11 @@ package http
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
+
+	"golang.org/x/net/idna"
+
+	"github.com/goplus/llgoexamples/x/net"
 )
 
 /**
@@ -204,6 +209,99 @@ func headerValueContainsToken(v string, token string) bool { // httpguts.headerV
 		v = v[comma+1:]
 	}
 	return tokenEqual(trimOWS(v), token)
+}
+
+// PunycodeHostPort returns the IDNA Punycode version
+// of the provided "host" or "host:port" string.
+func PunycodeHostPort(v string) (string, error) { // httpguts.PunycodeHostPort
+	if isASCII(v) {
+		return v, nil
+	}
+
+	host, port, err := net.SplitHostPort(v)
+	if err != nil {
+		// The input 'v' argument was just a "host" argument,
+		// without a port. This error should not be returned
+		// to the caller.
+		host = v
+		port = ""
+	}
+	host, err = idna.ToASCII(host)
+	if err != nil {
+		// Non-UTF-8? Not representable in Punycode, in any
+		// case.
+		return "", err
+	}
+	if port == "" {
+		return host, nil
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
+func isASCII(s string) bool { // httpguts.isASCII
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidHostHeader reports whether h is a valid host header.
+func ValidHostHeader(h string) bool { // httpguts.ValidHostHeader
+	// The latest spec is actually this:
+	//
+	// http://tools.ietf.org/html/rfc7230#section-5.4
+	//     Host = uri-host [ ":" port ]
+	//
+	// Where uri-host is:
+	//     http://tools.ietf.org/html/rfc3986#section-3.2.2
+	//
+	// But we're going to be much more lenient for now and just
+	// search for any byte that's not a valid byte in any of those
+	// expressions.
+	for i := 0; i < len(h); i++ {
+		if !validHostByte[h[i]] {
+			return false
+		}
+	}
+	return true
+}
+
+// See the validHostHeader comment.
+var validHostByte = [256]bool{ // httpguts.validHostByte
+	'0': true, '1': true, '2': true, '3': true, '4': true, '5': true, '6': true, '7': true,
+	'8': true, '9': true,
+
+	'a': true, 'b': true, 'c': true, 'd': true, 'e': true, 'f': true, 'g': true, 'h': true,
+	'i': true, 'j': true, 'k': true, 'l': true, 'm': true, 'n': true, 'o': true, 'p': true,
+	'q': true, 'r': true, 's': true, 't': true, 'u': true, 'v': true, 'w': true, 'x': true,
+	'y': true, 'z': true,
+
+	'A': true, 'B': true, 'C': true, 'D': true, 'E': true, 'F': true, 'G': true, 'H': true,
+	'I': true, 'J': true, 'K': true, 'L': true, 'M': true, 'N': true, 'O': true, 'P': true,
+	'Q': true, 'R': true, 'S': true, 'T': true, 'U': true, 'V': true, 'W': true, 'X': true,
+	'Y': true, 'Z': true,
+
+	'!':  true, // sub-delims
+	'$':  true, // sub-delims
+	'%':  true, // pct-encoded (and used in IPv6 zones)
+	'&':  true, // sub-delims
+	'(':  true, // sub-delims
+	')':  true, // sub-delims
+	'*':  true, // sub-delims
+	'+':  true, // sub-delims
+	',':  true, // sub-delims
+	'-':  true, // unreserved
+	'.':  true, // unreserved
+	':':  true, // IPv6address + Host expression's optional port
+	';':  true, // sub-delims
+	'=':  true, // sub-delims
+	'[':  true,
+	'\'': true, // sub-delims
+	']':  true,
+	'_':  true, // unreserved
+	'~':  true, // unreserved
 }
 
 // IsPrint returns whether s is ASCII and printable according to

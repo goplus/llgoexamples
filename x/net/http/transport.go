@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/url"
 	"sync"
 	"sync/atomic"
@@ -13,9 +14,9 @@ import (
 
 	"github.com/goplus/llgo/c"
 	"github.com/goplus/llgo/c/libuv"
-	"github.com/goplus/llgo/c/net"
+	cnet "github.com/goplus/llgo/c/net"
 	"github.com/goplus/llgo/c/syscall"
-	xnet "github.com/goplus/llgo/x/net"
+	"github.com/goplus/llgoexamples/x/net"
 	"github.com/goplus/llgoexamples/rust/hyper"
 )
 
@@ -204,6 +205,7 @@ func (t *Transport) connectMethodForRequest(treq *transportRequest) (cm connectM
 	if t.Proxy != nil {
 		cm.proxyURL, err = t.Proxy(treq.Request)
 	}
+	// TODO(spongehah) cm.treq(connectMethod)
 	cm.treq = treq
 	cm.onlyH1 = treq.requiresHTTP1()
 	return cm, err
@@ -352,7 +354,7 @@ func (t *Transport) RoundTrip(req *Request) (*Response, error) {
 	}
 
 	for {
-		// TODO(spongehah) timeout: because of that ctx not initialized ( initialized in setRequestCancel() )
+		// TODO(spongehah) timeout(t.RoundTrip): because of that ctx not initialized ( initialized in setRequestCancel() )
 		//select {
 		//case <-ctx.Done():
 		//	req.closeBody()
@@ -394,7 +396,7 @@ func (t *Transport) RoundTrip(req *Request) (*Response, error) {
 		}
 
 		// Failed. Clean up and determine whether to retry.
-		// TODO(spongehah) Retry & ConnPool
+		// TODO(spongehah) Retry & ConnPool(t.RoundTrip)
 		return nil, err
 	}
 }
@@ -421,7 +423,7 @@ func (t *Transport) getConn(treq *transportRequest, cm connectMethod) (pc *persi
 		}
 	}()
 
-	// TODO(spongehah) ConnPool
+	// TODO(spongehah) ConnPool(t.getConn)
 	//// Queue for idle connection.
 	//if delivered := t.queueForIdleConn(w); delivered {
 	//	pc := w.pc
@@ -524,7 +526,7 @@ func (t *Transport) dialConnFor(w *wantConn) {
 
 	pc, err := t.dialConn(w.ctx, w.cm)
 	w.tryDeliver(pc, err)
-	// TODO(spongehah) ConnPool
+	// TODO(spongehah) ConnPool(t.dialConnFor)
 	//delivered := w.tryDeliver(pc, err)
 	// Handle undelivered or shareable connections
 	//if err == nil && (!delivered || pc.alt != nil) {
@@ -601,6 +603,15 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 		writeLoopDone: make(chan struct{}, 1),
 	}
 
+	//trace := httptrace.ContextClientTrace(ctx)
+	//wrapErr := func(err error) error {
+	//	if cm.proxyURL != nil {
+	//		// Return a typed error, per Issue 16997
+	//		return &net.OpError{Op: "proxyconnect", Net: "tcp", Err: err}
+	//	}
+	//	return err
+	//}
+
 	//if cm.scheme() == "https" && t.hasCustomTLSDialer() {
 	//	var err error
 	//	pconn.conn, err = t.customDialTLS(ctx, "tcp", cm.addr())
@@ -628,7 +639,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 	//	}
 	//} else {
 	//conn, err := t.dial(ctx, "tcp", cm.addr())
-	conn, err := t.dial(ctx, pconn, cm)
+	conn, err := t.dial(ctx, cm)
 	if err != nil {
 		return nil, err
 	}
@@ -642,9 +653,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 	// Prepare client options
 	opts := hyper.NewClientConnOptions()
 	opts.Exec(exec)
-	pconn.io = hyperIo
 	pconn.exec = exec
-	pconn.opts = opts
 	// send the handshake
 	handshakeTask := hyper.Handshake(hyperIo, opts)
 	setTaskId(handshakeTask, write)
@@ -662,7 +671,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 	//}
 	//}
 
-	// TODO(spongehah) Proxy(https/sock5)
+	// TODO(spongehah) Proxy(https/sock5)(t.dialConn)
 	// Proxy setup.
 	switch {
 	case cm.proxyURL == nil:
@@ -700,7 +709,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 	return pconn, nil
 }
 
-func (t *Transport) dial(ctx context.Context, pconn *persistConn, cm connectMethod) (*connData, error) {
+func (t *Transport) dial(ctx context.Context, cm connectMethod) (*connData, error) {
 	treq := cm.treq
 	host := treq.URL.Hostname()
 	port := treq.URL.Port()
@@ -725,15 +734,16 @@ func (t *Transport) dial(ctx context.Context, pconn *persistConn, cm connectMeth
 	}
 
 	libuv.InitTcp(loop, &conn.TcpHandle)
+	libuv.InitTcp(loop, &conn.TcpHandle)
 	(*libuv.Handle)(c.Pointer(&conn.TcpHandle)).SetData(c.Pointer(conn))
 
-	var hints net.AddrInfo
+	var hints cnet.AddrInfo
 	c.Memset(c.Pointer(&hints), 0, unsafe.Sizeof(hints))
 	hints.Family = syscall.AF_UNSPEC
 	hints.SockType = syscall.SOCK_STREAM
 
-	var res *net.AddrInfo
-	status := net.Getaddrinfo(c.AllocaCStr(host), c.AllocaCStr(port), &hints, &res)
+	var res *cnet.AddrInfo
+	status := cnet.Getaddrinfo(c.AllocaCStr(host), c.AllocaCStr(port), &hints, &res)
 	if status != 0 {
 		close(treq.Request.timeoutch)
 		return nil, fmt.Errorf("getaddrinfo error\n")
@@ -746,14 +756,14 @@ func (t *Transport) dial(ctx context.Context, pconn *persistConn, cm connectMeth
 		return nil, fmt.Errorf("connect error: %s\n", c.GoString(libuv.Strerror(libuv.Errno(status))))
 	}
 
-	net.Freeaddrinfo(res)
+	cnet.Freeaddrinfo(res)
 	return conn, nil
 }
 
 func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err error) {
 	testHookEnterRoundTrip()
 	if !pc.t.replaceReqCanceler(req.cancelKey, pc.cancelRequest) {
-		// TODO(spongehah) ConnPool
+		// TODO(spongehah) ConnPool(pc.roundTrip)
 		//pc.t.putOrCloseIdleConn(pc)
 		return nil, errRequestCanceled
 	}
@@ -816,7 +826,7 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 	// request body.
 
 	// In Hyper, the writeLoop() and readLoop() are combined together --> readWriteLoop().
-	startBytesWritten := pc.nwrite
+	startBytesWritten := pc.conn.nwrite
 	writeErrCh := make(chan error, 1)
 	pc.writech <- writeRequest{req: req, ch: writeErrCh}
 
@@ -890,7 +900,41 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 // readWriteLoop handles the main I/O loop for a persistent connection.
 // It processes incoming requests, sends them to the server, and handles responses.
 func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
+	// writeLoop related
 	defer close(pc.writeLoopDone)
+
+	// readLoop related
+	closeErr := errReadLoopExiting // default value, if not changed below
+	defer func() {
+		pc.close(closeErr)
+		// TODO(spongehah) ConnPool(readWriteLoop)
+		//pc.t.removeIdleConn(pc)
+	}()
+
+	//tryPutIdleConn := func(trace *httptrace.ClientTrace) bool {
+	//	if err := pc.t.tryPutIdleConn(pc); err != nil {
+	//		closeErr = err
+	//		if trace != nil && trace.PutIdleConn != nil && err != errKeepAlivesDisabled {
+	//			trace.PutIdleConn(err)
+	//		}
+	//		return false
+	//	}
+	//	if trace != nil && trace.PutIdleConn != nil {
+	//		trace.PutIdleConn(nil)
+	//	}
+	//	return true
+	//}
+
+	// eofc is used to block caller goroutines reading from Response.Body
+	// at EOF until this goroutines has (potentially) added the connection
+	// back to the idle pool.
+	eofc := make(chan struct{}, 1)
+	defer close(eofc) // unblock reader on errors
+
+	// Read this once, before loop starts. (to avoid races in tests)
+	testHookMu.Lock()
+	testHookReadLoopBeforeNextRead := testHookReadLoopBeforeNextRead
+	testHookMu.Unlock()
 
 	const debugReadWriteLoop = true // Debug switch provided for developers
 
@@ -918,7 +962,7 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 			}
 			taskId := (taskId)(uintptr(task.Userdata()))
 			if debugReadWriteLoop {
-				println(taskId)
+				println("taskId: ", taskId)
 			}
 			switch taskId {
 			case write:
@@ -927,31 +971,16 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 				}
 				wr := <-pc.writech // blocking
 
-				startBytesWritten := pc.nwrite
-
+				startBytesWritten := pc.conn.nwrite
 				err := checkTaskType(task, write)
-				if err != nil {
-					wr.ch <- err
-					// Free the resources
-					//freeResources(task, respBody, bodyWriter, pc.exec, pc, rc)
-					pc.close(err)
-					return
-				}
-
 				client := (*hyper.ClientConn)(task.Value())
 				task.Free()
-
-				// Prepare the hyper.Request
-				hyperReq, err := newHyperRequest(wr.req.Request)
 				if err == nil {
-					// Send it!
-					sendTask := client.Send(hyperReq)
-					setTaskId(sendTask, read)
-					sendRes := pc.exec.Push(sendTask)
-					if sendRes != hyper.OK {
-						err = errors.New("failed to send the request")
-					}
+					// TODO(spongehah) Proxy(writeLoop)
+					err = wr.req.Request.write(pc.isProxy, wr.req.extra, client, pc.exec)
 				}
+				// For this request, no longer need the client
+				client.Free()
 				if bre, ok := err.(requestBodyReadError); ok {
 					err = bre.error
 					// Errors reading from the user's
@@ -964,19 +993,15 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 					wr.req.setError(err)
 				}
 				if err != nil {
-					if pc.nwrite == startBytesWritten {
+					if pc.conn.nwrite == startBytesWritten {
 						err = nothingWrittenError{err}
 					}
 					//pc.writeErrCh <- err // to the body reader, which might recycle us
 					wr.ch <- err // to the roundTrip function
-					// Free the resources
-					//freeResources(task, respBody, bodyWriter, pc.exec, pc, rc)
 					pc.close(err)
 					return
 				}
 
-				// For this example, no longer need the client
-				client.Free()
 				if debugReadWriteLoop {
 					println("write end")
 				}
@@ -985,39 +1010,7 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 					println("read")
 				}
 
-				rc := <-pc.reqch // blocking
-
-				closeErr := errReadLoopExiting // default value, if not changed below
-				defer func() {
-					pc.close(closeErr)
-					// TODO(spongehah) ConnPool(readWriteLoop)
-					//pc.t.removeIdleConn(pc)
-				}()
-
-				//tryPutIdleConn := func(trace *httptrace.ClientTrace) bool {
-				//	if err := pc.t.tryPutIdleConn(pc); err != nil {
-				//		closeErr = err
-				//		if trace != nil && trace.PutIdleConn != nil && err != errKeepAlivesDisabled {
-				//			trace.PutIdleConn(err)
-				//		}
-				//		return false
-				//	}
-				//	if trace != nil && trace.PutIdleConn != nil {
-				//		trace.PutIdleConn(nil)
-				//	}
-				//	return true
-				//}
-
-				// eofc is used to block caller goroutines reading from Response.Body
-				// at EOF until this goroutines has (potentially) added the connection
-				// back to the idle pool.
-				eofc := make(chan struct{}, 1)
-				defer close(eofc) // unblock reader on errors
-
-				// Read this once, before loop starts. (to avoid races in tests)
-				testHookMu.Lock()
-				testHookReadLoopBeforeNextRead := testHookReadLoopBeforeNextRead
-				testHookMu.Unlock()
+				err := checkTaskType(task, read)
 
 				pc.mu.Lock()
 				if pc.numExpectedResponses == 0 {
@@ -1027,7 +1020,9 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 				}
 				pc.mu.Unlock()
 
-				err := checkTaskType(task, read)
+				rc := <-pc.reqch // blocking
+				//trace := httptrace.ContextClientTrace(rc.req.Context())
+
 				// Take the results
 				hyperResp := (*hyper.Response)(task.Value())
 				task.Free()
@@ -1035,13 +1030,17 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 				var resp *Response
 				var respBody *hyper.Body
 				if err == nil {
-					resp, err = ReadResponse(hyperResp, rc.req)
+					var pr *io.PipeReader
+					pr, bodyWriter = io.Pipe()
+					resp, err = ReadResponse(pr, rc.req, hyperResp)
 					respBody = hyperResp.Body()
-					resp.Body, bodyWriter = io.Pipe()
 				} else {
 					err = transportReadFromServerError{err}
 					closeErr = err
 				}
+
+				// No longer need the response
+				hyperResp.Free()
 
 				if err != nil {
 					select {
@@ -1049,8 +1048,6 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 					case <-rc.callerGone:
 						return
 					}
-					// Free the resources
-					freeResources(task, respBody, bodyWriter, pc.exec, pc, rc)
 					return
 				}
 
@@ -1129,7 +1126,7 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 				}
 				resp.Body = body
 
-				// TODO(spongehah) gzip fail
+				// TODO(spongehah) gzip fail(readWriteLoop)
 				if rc.addedGzip && EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
 					resp.Body = &gzipReader{body: body}
 					resp.Header.Del("Content-Encoding")
@@ -1140,12 +1137,11 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 
 				rw.waitForBodyRead = waitForBodyRead
 				rw.rc = rc
-				rw.eofc = eofc
 				bodyForeachTask := respBody.Foreach(appendToResponseBody, c.Pointer(bodyWriter))
 				setTaskId(bodyForeachTask, readDone)
 				pc.exec.Push(bodyForeachTask)
 
-				// TODO(spongehah) select blocking
+				// TODO(spongehah) select blocking(readWriteLoop)
 				//select {
 				//case rc.ch <- responseAndError{res: resp}:
 				//case <-rc.callerGone:
@@ -1153,46 +1149,31 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 				//}
 				rc.ch <- responseAndError{res: resp}
 
-				// No longer need the response
-				hyperResp.Free()
 				if debugReadWriteLoop {
 					println("read end")
 				}
-
-				//pc.t.replaceReqCanceler(rc.cancelKey, nil)
-				//eofc <- struct{}{}
 			case readDone:
 				// A background task of reading the response body is completed
 				if debugReadWriteLoop {
 					println("readDone")
 				}
-				err := checkTaskType(task, readDone)
-				if err != nil {
-					fmt.Println(err)
-					pc.close(err)
-					alive = false
+				if bodyWriter != nil {
+					bodyWriter.Close()
 				}
+				checkTaskType(task, readDone)
 
-				if task.Type() != hyper.TaskEmpty {
-					err = errors.New("unexpected task type\n")
-					fmt.Println(err)
-					pc.close(err)
-					return
-				}
-
+				hyperBodyEOF := task.Type() == hyper.TaskEmpty
 				// free the task
 				task.Free()
-				bodyWriter.Close()
 
 				// Before looping back to the top of this function and peeking on
 				// the bufio.Reader, wait for the caller goroutine to finish
 				// reading the response body. (or for cancellation or death)
-				rc := rw.rc
 				select {
-				//case bodyEOF := <-rw.waitForBodyRead:
-				case <-rw.waitForBodyRead:
+				case bodyEOF := <-rw.waitForBodyRead:
+					bodyEOF = bodyEOF && hyperBodyEOF
 					//replaced := pc.t.replaceReqCanceler(rc.cancelKey, nil) // before pc might return to idle pool
-					pc.t.replaceReqCanceler(rc.cancelKey, nil) // before pc might return to idle pool
+					pc.t.replaceReqCanceler(rw.rc.cancelKey, nil) // before pc might return to idle pool
 					// TODO(spongehah) ConnPool(readWriteLoop)
 					//alive = alive &&
 					//	bodyEOF &&
@@ -1200,14 +1181,14 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 					//	pc.wroteRequest() &&
 					//	replaced && tryPutIdleConn(trace)
 
-					rw.eofc <- struct{}{}
+					eofc <- struct{}{}
 				// TODO(spongehah) cancel(pc.readWriteLoop)
-				//case <-rc.req.Cancel:
+				//case <-rw.rc.req.Cancel:
 				//	alive = false
-				//	pc.t.CancelRequest(rc.req)
-				//case <-rc.req.Context().Done():
+				//	pc.t.CancelRequest(rw.rc.req)
+				//case <-rw.rc.req.Context().Done():
 				//	alive = false
-				//	pc.t.cancelRequest(rc.cancelKey, rc.req.Context().Err())
+				//	pc.t.cancelRequest(rw.rc.cancelKey, rw.rc.req.Context().Err())
 				case <-pc.closech:
 					alive = false
 				}
@@ -1232,12 +1213,25 @@ type connData struct {
 	ReadBuf       libuv.Buf
 	TimeoutTimer  libuv.Timer
 	ReadBufFilled uintptr
+	nwrite        int64 // bytes written(Replaced from persistConn's nwrite)
 	ReadWaker     *hyper.Waker
 	WriteWaker    *hyper.Waker
 }
 
 func (conn *connData) Close() error {
-	freeConnData(conn)
+	if conn.ReadWaker != nil {
+		conn.ReadWaker.Free()
+		conn.ReadWaker = nil
+	}
+	if conn.WriteWaker != nil {
+		conn.WriteWaker.Free()
+		conn.WriteWaker = nil
+	}
+	if conn.ReadBuf.Base != nil {
+		c.Free(c.Pointer(conn.ReadBuf.Base))
+		conn.ReadBuf.Base = nil
+	}
+	(*libuv.Handle)(c.Pointer(&conn.TcpHandle)).Close(nil)
 	return nil
 }
 
@@ -1352,6 +1346,7 @@ func writeCallBack(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen ui
 	ret := req.Write((*libuv.Stream)(c.Pointer(&conn.TcpHandle)), &initBuf, 1, onWrite)
 	// If the write operation was successfully initiated
 	if ret >= 0 {
+		conn.nwrite += int64(bufLen)
 		// Return the number of bytes to be written
 		return bufLen
 	}
@@ -1397,7 +1392,6 @@ const (
 type readWaiter struct {
 	rc              requestAndChan
 	waitForBodyRead chan bool
-	eofc            chan struct{}
 }
 
 // setTaskId Set taskId to the task's userdata as a unique identifier
@@ -1411,93 +1405,49 @@ func checkTaskType(task *hyper.Task, curTaskId taskId) error {
 	switch curTaskId {
 	case write:
 		if task.Type() == hyper.TaskError {
-			c.Printf(c.Str("handshake task error!\n"))
+			log.Printf("[readWriteLoop::write]handshake task error!\n")
 			return fail((*hyper.Error)(task.Value()))
 		}
 		if task.Type() != hyper.TaskClientConn {
-			return fmt.Errorf("unexpected task type\n")
+			return fmt.Errorf("[readWriteLoop::write]unexpected task type\n")
 		}
 		return nil
 	case read:
 		if task.Type() == hyper.TaskError {
-			c.Printf(c.Str("write task error!\n"))
+			log.Printf("[readWriteLoop::read]write task error!\n")
 			return fail((*hyper.Error)(task.Value()))
 		}
 		if task.Type() != hyper.TaskResponse {
-			c.Printf(c.Str("unexpected task type\n"))
-			return fmt.Errorf("unexpected task type\n")
+			c.Printf(c.Str("[readWriteLoop::read]unexpected task type\n"))
+			return errors.New("[readWriteLoop::read]unexpected task type\n")
 		}
 		return nil
 	case readDone:
 		if task.Type() == hyper.TaskError {
-			c.Printf(c.Str("read error!\n"))
+			log.Printf("[readWriteLoop::readDone]read response body error!\n")
 			return fail((*hyper.Error)(task.Value()))
 		}
 		return nil
 	case notSet:
 	}
-	return fmt.Errorf("unexpected TaskId\n")
+	return errors.New("[readWriteLoop]unexpected task type\n")
 }
 
 // fail prints the error details and panics
 func fail(err *hyper.Error) error {
 	if err != nil {
-		c.Printf(c.Str("error code: %d\n"), err.Code())
+		c.Printf(c.Str("[readWriteLoop]error code: %d\n"), err.Code())
 		// grab the error details
 		var errBuf [256]c.Char
 		errLen := err.Print((*uint8)(c.Pointer(&errBuf[:][0])), uintptr(len(errBuf)))
 
-		c.Printf(c.Str("details: %.*s\n"), c.Int(errLen), c.Pointer(&errBuf[:][0]))
+		c.Printf(c.Str("[readWriteLoop]details: %.*s\n"), c.Int(errLen), c.Pointer(&errBuf[:][0]))
 
 		// clean up the error
 		err.Free()
-		return fmt.Errorf("hyper request error, error code: %d\n", int(err.Code()))
+		return fmt.Errorf("[readWriteLoop]hyper request error, error code: %d\n", int(err.Code()))
 	}
 	return nil
-}
-
-// freeResources frees the resources
-func freeResources(task *hyper.Task, respBody *hyper.Body, bodyWriter *io.PipeWriter, exec *hyper.Executor, pc *persistConn, rc requestAndChan) {
-	// Cleaning up before exiting
-	if task != nil {
-		task.Free()
-	}
-	if respBody != nil {
-		respBody.Free()
-	}
-	if bodyWriter != nil {
-		bodyWriter.Close()
-	}
-	if exec != nil {
-		exec.Free()
-	}
-	(*libuv.Handle)(c.Pointer(&pc.conn.TcpHandle)).Close(nil)
-	freeConnData(pc.conn)
-
-	closeChannels(rc, pc)
-}
-
-// closeChannels closes the channels
-func closeChannels(rc requestAndChan, pc *persistConn) {
-	// Closing the channel
-	close(rc.ch)
-	close(pc.reqch)
-}
-
-// freeConnData frees the connection data
-func freeConnData(conn *connData) {
-	if conn.ReadWaker != nil {
-		conn.ReadWaker.Free()
-		conn.ReadWaker = nil
-	}
-	if conn.WriteWaker != nil {
-		conn.WriteWaker.Free()
-		conn.WriteWaker = nil
-	}
-	if conn.ReadBuf.Base != nil {
-		c.Free(c.Pointer(conn.ReadBuf.Base))
-		conn.ReadBuf.Base = nil
-	}
 }
 
 // ----------------------------------------------------------
@@ -1614,7 +1564,7 @@ func canonicalAddr(url *url.URL) string {
 	if port == "" {
 		port = portMap[url.Scheme]
 	}
-	return xnet.JoinHostPort(idnaASCIIFromURL(url), port)
+	return net.JoinHostPort(idnaASCIIFromURL(url), port)
 }
 
 // persistConn wraps a connection, usually a persistent one
@@ -1625,22 +1575,18 @@ type persistConn struct {
 	// If it's non-nil, the rest of the fields are unused.
 	alt RoundTripper
 
-	//br      *bufio.Reader       // from conn
-	//bw      *bufio.Writer       // to conn
-	//nwrite  int64               // bytes written
-	//writech chan writeRequest   // written by roundTrip; read by writeLoop
-	//closech chan struct{}       // closed when conn closed
+	t        *Transport
+	cacheKey connectMethodKey
+	conn     *connData
+	//tlsState *tls.ConnectionState
+	//nwrite        int64       // bytes written(Replaced by connData.nwrite)
+	reqch   chan requestAndChan // written by roundTrip; read by readWriteLoop
+	writech chan writeRequest   // written by roundTrip; read by readWriteLoop
+	closech chan struct{}       // closed when conn closed
+	isProxy bool
 
-	t             *Transport
-	cacheKey      connectMethodKey
-	conn          *connData
-	nwrite        int64               // bytes written
-	reqch         chan requestAndChan // written by roundTrip; read by readWriteLoop
-	writech       chan writeRequest   // written by roundTrip; read by writeLoop(Already merged into reqch)
-	closech       chan struct{}       // closed when conn closed
-	writeLoopDone chan struct{}       // closed when write loop ends
+	writeLoopDone chan struct{} // closed when readWriteLoop ends
 
-	isProxy              bool
 	mu                   sync.Mutex // guards following fields
 	numExpectedResponses int
 	closed               error // set non-nil when conn is closed, before closech is closed
@@ -1653,8 +1599,6 @@ type persistConn struct {
 
 	// hyper specific
 	exec *hyper.Executor
-	opts *hyper.ClientConnOptions
-	io   *hyper.Io
 }
 
 func (pc *persistConn) cancelRequest(err error) {
@@ -1693,6 +1637,10 @@ func (pc *persistConn) closeLocked(err error) {
 		}
 	}
 	pc.mutateHeaderFunc = nil
+	// hyper related
+	if pc.exec != nil {
+		pc.exec.Free()
+	}
 }
 
 // mapRoundTripError returns the appropriate error value for
@@ -1738,14 +1686,14 @@ func (pc *persistConn) mapRoundTripError(req *transportRequest, startBytesWritte
 	}
 
 	if _, ok := err.(transportReadFromServerError); ok {
-		if pc.nwrite == startBytesWritten {
+		if pc.conn.nwrite == startBytesWritten {
 			return nothingWrittenError{err}
 		}
 		// Don't decorate
 		return err
 	}
 	if pc.isBroken() {
-		if pc.nwrite == startBytesWritten {
+		if pc.conn.nwrite == startBytesWritten {
 			return nothingWrittenError{err}
 		}
 		return fmt.Errorf("net/http: HTTP/1.x transport connection broken: %w", err)
@@ -1887,7 +1835,7 @@ func (w *wantConn) cancel(t *Transport, err error) {
 	w.err = err
 	w.mu.Unlock()
 
-	// TODO(spongehah) ConnPool
+	// TODO(spongehah) ConnPool(w.cancel)
 	//if pc != nil {
 	//	t.putOrCloseIdleConn(pc)
 	//}

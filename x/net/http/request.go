@@ -46,7 +46,7 @@ type Request struct {
 	ctx      context.Context
 }
 
-var defaultChunkSize uintptr = 8192
+const defaultChunkSize = 8192
 
 // NewRequest wraps NewRequestWithContext using context.Background.
 func NewRequest(method, url string, body io.Reader) (*Request, error) {
@@ -128,6 +128,7 @@ func NewRequestWithContext(ctx context.Context, method, urlStr string, body io.R
 				r := bytes.NewReader(buf)
 				return io.NopCloser(r), nil
 			}
+
 		case *bytes.Reader:
 			req.ContentLength = int64(v.Len())
 			snapshot := *v
@@ -166,122 +167,36 @@ func NewRequestWithContext(ctx context.Context, method, urlStr string, body io.R
 	return req, nil
 }
 
-func printInformational(userdata c.Pointer, resp *hyper.Response) {
-	status := resp.Status()
-	fmt.Println("Informational (1xx): ", status)
-}
-
-type postReq struct {
-	req *Request
-	buf []byte
-}
-
-func setPostData(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
-	req := (*postReq)(userdata)
-	n, err := req.req.Body.Read(req.buf)
-	if err != nil {
-		if err == io.EOF {
-			*chunk = nil
-			return hyper.PollReady
-		}
-		fmt.Println("error reading upload file: ", err)
-		return hyper.PollError
-	}
-	if n > 0 {
-		*chunk = hyper.CopyBuf(&req.buf[0], uintptr(n))
-		return hyper.PollReady
-	}
-	if n == 0 {
-		*chunk = nil
-		return hyper.PollReady
-	}
-
-	fmt.Printf("error reading request body: %s\n", c.GoString(c.Strerror(os.Errno)))
-	return hyper.PollError
-}
-
-func setPostDataNoCopy(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
-	type buf struct {
-		data   *uint8
-		len    uintptr
-		Unused [16]byte
-	}
-	req := (*postReq)(userdata)
-	buffer := &buf{
-		data: &req.buf[0],
-		len:  uintptr(len(req.buf)),
-	}
-
-	*chunk = (*hyper.Buf)(c.Pointer(buffer))
-	n, err := req.req.Body.Read(req.buf)
-	if err != nil {
-		if err == io.EOF {
-			*chunk = nil
-			return hyper.PollReady
-		}
-		fmt.Println("error reading upload file: ", err)
-		return hyper.PollError
-	}
-	if n > 0 {
-		return hyper.PollReady
-	}
-	if n == 0 {
-		*chunk = nil
-		return hyper.PollReady
-	}
-
-	fmt.Printf("error reading request body: %s\n", c.GoString(c.Strerror(os.Errno)))
-	return hyper.PollError
-}
-
-func newHyperRequest(req *Request) (*hyper.Request, error) {
-	host := req.Host
-	uri := req.URL.RequestURI()
-	method := req.Method
-	// Prepare the request
-	hyperReq := hyper.NewRequest()
-	// Set the request method and uri
-	if hyperReq.SetMethod(&[]byte(method)[0], c.Strlen(c.AllocaCStr(method))) != hyper.OK {
-		return nil, fmt.Errorf("error setting method %s\n", method)
-	}
-	if hyperReq.SetURI(&[]byte(uri)[0], c.Strlen(c.AllocaCStr(uri))) != hyper.OK {
-		return nil, fmt.Errorf("error setting uri %s\n", uri)
-	}
-	// Set the request headers
-	reqHeaders := hyperReq.Headers()
-	if reqHeaders.Set(&[]byte("Host")[0], c.Strlen(c.Str("Host")), &[]byte(host)[0], c.Strlen(c.AllocaCStr(host))) != hyper.OK {
-		return nil, fmt.Errorf("error setting header: Host: %s\n", host)
-	}
-
-	if method == "POST" && req.Body != nil {
-		// 100-continue
-		if req.ProtoAtLeast(1, 1) && req.Body != nil && req.expectsContinue() {
-			hyperReq.OnInformational(printInformational, nil)
-		}
-
-		hyperReqBody := hyper.NewBody()
-		reqData := &postReq{
-			req: req,
-			buf: make([]byte, 3),
-		}
-		hyperReqBody.SetUserdata(c.Pointer(reqData))
-		hyperReqBody.SetDataFunc(setPostData)
-		hyperReq.SetBody(hyperReqBody)
-	}
-
-	// Add user-defined request headers to hyper.Request
-	err := req.setHeaders(hyperReq)
-	if err != nil {
-		return nil, err
-	}
-
-	return hyperReq, nil
-}
+//func setPostDataNoCopy(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
+//	req := (*postReq)(userdata)
+//	buf := req.hyperBuf.Bytes()
+//	len := req.hyperBuf.Len()
+//	n, err := req.req.Body.Read(unsafe.Slice(buf, len))
+//	if err != nil {
+//		if err == io.EOF {
+//			*chunk = nil
+//			return hyper.PollReady
+//		}
+//		fmt.Println("error reading upload file: ", err)
+//		return hyper.PollError
+//	}
+//	if n > 0 {
+//		*chunk = req.hyperBuf
+//		return hyper.PollReady
+//	}
+//	if n == 0 {
+//		*chunk = nil
+//		return hyper.PollReady
+//	}
+//
+//	fmt.Printf("error reading request body: %s\n", c.GoString(c.Strerror(os.Errno)))
+//	return hyper.PollError
+//}
 
 // setHeaders sets the headers of the request
-func (req *Request) setHeaders(hyperReq *hyper.Request) error {
+func (r *Request) setHeaders(hyperReq *hyper.Request) error {
 	headers := hyperReq.Headers()
-	for key, values := range req.Header {
+	for key, values := range r.Header {
 		valueLen := len(values)
 		if valueLen > 1 {
 			for _, value := range values {
@@ -316,23 +231,6 @@ func (r *Request) closeBody() error {
 		return nil
 	}
 	return r.Body.Close()
-}
-
-func validMethod(method string) bool {
-	/*
-	     Method         = "OPTIONS"                ; Section 9.2
-	                    | "GET"                    ; Section 9.3
-	                    | "HEAD"                   ; Section 9.4
-	                    | "POST"                   ; Section 9.5
-	                    | "PUT"                    ; Section 9.6
-	                    | "DELETE"                 ; Section 9.7
-	                    | "TRACE"                  ; Section 9.8
-	                    | "CONNECT"                ; Section 9.9
-	                    | extension-method
-	   extension-method = token
-	     token          = 1*<any CHAR except CTLs or separators>
-	*/
-	return len(method) > 0 && strings.IndexFunc(method, isNotToken) == -1
 }
 
 // Context returns the request's context. To change the context, use
@@ -385,6 +283,215 @@ func (r *Request) Cookies() []*Cookie {
 func (r *Request) ProtoAtLeast(major, minor int) bool {
 	return r.ProtoMajor > major ||
 		r.ProtoMajor == major && r.ProtoMinor >= minor
+}
+
+// errMissingHost is returned by Write when there is no Host or URL present in
+// the Request.
+var errMissingHost = errors.New("http: Request.Write on Request with no Host or URL set")
+
+// extraHeaders may be nil
+// waitForContinue may be nil
+// always closes body
+func (r *Request) write(usingProxy bool, extraHeader Header, client *hyper.ClientConn, exec *hyper.Executor) (err error) {
+	//trace := httptrace.ContextClientTrace(r.Context())
+	//if trace != nil && trace.WroteRequest != nil {
+	//	defer func() {
+	//		trace.WroteRequest(httptrace.WroteRequestInfo{
+	//			Err: err,
+	//		})
+	//	}()
+	//}
+
+	//closed := false
+	//defer func() {
+	//	if closed {
+	//		return
+	//	}
+	//	if closeErr := r.closeBody(); closeErr != nil && err == nil {
+	//		err = closeErr
+	//	}
+	//}()
+
+	// Prepare the hyper.Request
+	hyperReq, err := r.newHyperRequest(usingProxy, extraHeader)
+	if err != nil {
+		return err
+	}
+	// Send it!
+	sendTask := client.Send(hyperReq)
+	setTaskId(sendTask, read)
+	sendRes := exec.Push(sendTask)
+	if sendRes != hyper.OK {
+		err = errors.New("failed to send the request")
+	}
+	return err
+}
+
+func (r *Request) newHyperRequest(usingProxy bool, extraHeader Header) (*hyper.Request, error) {
+	// Find the target host. Prefer the Host: header, but if that
+	// is not given, use the host from the request URL.
+	//
+	// Clean the host, in case it arrives with unexpected stuff in it.
+	host := r.Host
+	if host == "" {
+		if r.URL == nil {
+			return nil, errMissingHost
+		}
+		host = r.URL.Host
+	}
+	host, err := PunycodeHostPort(host)
+	if err != nil {
+		return nil, err
+	}
+	// Validate that the Host header is a valid header in general,
+	// but don't validate the host itself. This is sufficient to avoid
+	// header or request smuggling via the Host field.
+	// The server can (and will, if it's a net/http server) reject
+	// the request if it doesn't consider the host valid.
+	if !ValidHostHeader(host) {
+		// Historically, we would truncate the Host header after '/' or ' '.
+		// Some users have relied on this truncation to convert a network
+		// address such as Unix domain socket path into a valid, ignored
+		// Host header (see https://go.dev/issue/61431).
+		//
+		// We don't preserve the truncation, because sending an altered
+		// header field opens a smuggling vector. Instead, zero out the
+		// Host header entirely if it isn't valid. (An empty Host is valid;
+		// see RFC 9112 Section 3.2.)
+		//
+		// Return an error if we're sending to a proxy, since the proxy
+		// probably can't do anything useful with an empty Host header.
+		if !usingProxy {
+			host = ""
+		} else {
+			return nil, errors.New("http: invalid Host header")
+		}
+	}
+
+	// According to RFC 6874, an HTTP client, proxy, or other
+	// intermediary must remove any IPv6 zone identifier attached
+	// to an outgoing URI.
+	host = removeZone(host)
+
+	ruri := r.URL.RequestURI()
+	if usingProxy && r.URL.Scheme != "" && r.URL.Opaque == "" {
+		ruri = r.URL.Scheme + "://" + host + ruri
+	} else if r.Method == "CONNECT" && r.URL.Path == "" {
+		// CONNECT requests normally give just the host and port, not a full URL.
+		ruri = host
+		if r.URL.Opaque != "" {
+			ruri = r.URL.Opaque
+		}
+	}
+	if stringContainsCTLByte(ruri) {
+		return nil, errors.New("net/http: can't write control character in Request.URL")
+	}
+
+
+
+
+	// Prepare the hyper request
+	hyperReq := hyper.NewRequest()
+
+	// Set the request line, default HTTP/1.1
+	if hyperReq.SetMethod(&[]byte(r.Method)[0], c.Strlen(c.AllocaCStr(r.Method))) != hyper.OK {
+		return nil, fmt.Errorf("error setting method %s\n", r.Method)
+	}
+	if hyperReq.SetURI(&[]byte(ruri)[0], c.Strlen(c.AllocaCStr(ruri))) != hyper.OK {
+		return nil, fmt.Errorf("error setting uri %s\n", ruri)
+	}
+	if hyperReq.SetVersion(c.Int(hyper.HTTPVersion11)) != hyper.OK {
+		return nil, fmt.Errorf("error setting httpversion %s\n", "HTTP/1.1")
+	}
+
+	// Set the request headers
+	reqHeaders := hyperReq.Headers()
+	if reqHeaders.Set(&[]byte("Host")[0], c.Strlen(c.Str("Host")), &[]byte(host)[0], c.Strlen(c.AllocaCStr(host))) != hyper.OK {
+		return nil, fmt.Errorf("error setting header: Host: %s\n", host)
+	}
+	err = r.setHeaders(hyperReq)
+	if err != nil {
+		return nil, err
+	}
+
+	if r.Body != nil {
+		// 100-continue
+		if r.ProtoAtLeast(1, 1) && r.Body != nil && r.expectsContinue() {
+			hyperReq.OnInformational(printInformational, nil)
+		}
+
+		hyperReqBody := hyper.NewBody()
+		//buf := make([]byte, 2)
+		//hyperBuf := hyper.CopyBuf(&buf[0], uintptr(2))
+		reqData := &postReq{
+			req: r,
+			buf: make([]byte, defaultChunkSize),
+			//hyperBuf: hyperBuf,
+		}
+		hyperReqBody.SetUserdata(c.Pointer(reqData))
+		hyperReqBody.SetDataFunc(setPostData)
+		//hyperReqBody.SetDataFunc(setPostDataNoCopy)
+		hyperReq.SetBody(hyperReqBody)
+	}
+
+	return hyperReq, nil
+}
+
+func printInformational(userdata c.Pointer, resp *hyper.Response) {
+	status := resp.Status()
+	fmt.Println("Informational (1xx): ", status)
+}
+
+type postReq struct {
+	req *Request
+	buf []byte
+	//hyperBuf *hyper.Buf
+}
+
+func setPostData(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
+	req := (*postReq)(userdata)
+	n, err := req.req.Body.Read(req.buf)
+	if err != nil {
+		if err == io.EOF {
+			println("EOF")
+			*chunk = nil
+			req.req.Body.Close()
+			return hyper.PollReady
+		}
+		fmt.Println("error reading request body: ", err)
+		return hyper.PollError
+	}
+	if n > 0 {
+		*chunk = hyper.CopyBuf(&req.buf[0], uintptr(n))
+		return hyper.PollReady
+	}
+	if n == 0 {
+		println("n == 0")
+		*chunk = nil
+		req.req.Body.Close()
+		return hyper.PollReady
+	}
+
+	req.req.Body.Close()
+	fmt.Printf("error reading request body: %s\n", c.GoString(c.Strerror(os.Errno)))
+	return hyper.PollError
+}
+
+func validMethod(method string) bool {
+	/*
+	     Method         = "OPTIONS"                ; Section 9.2
+	                    | "GET"                    ; Section 9.3
+	                    | "HEAD"                   ; Section 9.4
+	                    | "POST"                   ; Section 9.5
+	                    | "PUT"                    ; Section 9.6
+	                    | "DELETE"                 ; Section 9.7
+	                    | "TRACE"                  ; Section 9.8
+	                    | "CONNECT"                ; Section 9.9
+	                    | extension-method
+	   extension-method = token
+	     token          = 1*<any CHAR except CTLs or separators>
+	*/
+	return len(method) > 0 && strings.IndexFunc(method, isNotToken) == -1
 }
 
 // readCookies parses all "Cookie" values from the header h and
@@ -445,4 +552,21 @@ func idnaASCII(v string) (string, error) {
 		return v, nil
 	}
 	return idna.Lookup.ToASCII(v)
+}
+
+// removeZone removes IPv6 zone identifier from host.
+// E.g., "[fe80::1%en0]:8080" to "[fe80::1]:8080"
+func removeZone(host string) string {
+	if !strings.HasPrefix(host, "[") {
+		return host
+	}
+	i := strings.LastIndex(host, "]")
+	if i < 0 {
+		return host
+	}
+	j := strings.LastIndex(host[:i], "%")
+	if j < 0 {
+		return host
+	}
+	return host[:j] + host[i:]
 }
