@@ -16,8 +16,8 @@ import (
 	"github.com/goplus/llgo/c/libuv"
 	cnet "github.com/goplus/llgo/c/net"
 	"github.com/goplus/llgo/c/syscall"
-	"github.com/goplus/llgoexamples/x/net"
 	"github.com/goplus/llgoexamples/rust/hyper"
+	"github.com/goplus/llgoexamples/x/net"
 )
 
 // DefaultTransport is the default implementation of Transport and is
@@ -734,7 +734,6 @@ func (t *Transport) dial(ctx context.Context, cm connectMethod) (*connData, erro
 	}
 
 	libuv.InitTcp(loop, &conn.TcpHandle)
-	libuv.InitTcp(loop, &conn.TcpHandle)
 	(*libuv.Handle)(c.Pointer(&conn.TcpHandle)).SetData(c.Pointer(conn))
 
 	var hints cnet.AddrInfo
@@ -781,25 +780,26 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 	// uncompress the gzip stream if we were the layer that
 	// requested it.
 	requestedGzip := false
-	if !pc.t.DisableCompression &&
-		req.Header.Get("Accept-Encoding") == "" &&
-		req.Header.Get("Range") == "" &&
-		req.Method != "HEAD" {
-		// Request gzip only, not deflate. Deflate is ambiguous and
-		// not as universally supported anyway.
-		// See: https://zlib.net/zlib_faq.html#faq39
-		//
-		// Note that we don't request this for HEAD requests,
-		// due to a bug in nginx:
-		//   https://trac.nginx.org/nginx/ticket/358
-		//   https://golang.org/issue/5522
-		//
-		// We don't request gzip if the request is for a range, since
-		// auto-decoding a portion of a gzipped document will just fail
-		// anyway. See https://golang.org/issue/8923
-		requestedGzip = true
-		req.extraHeaders().Set("Accept-Encoding", "gzip")
-	}
+	// TODO(spongehah) gzip(pc.roundTrip)
+	//if !pc.t.DisableCompression &&
+	//	req.Header.Get("Accept-Encoding") == "" &&
+	//	req.Header.Get("Range") == "" &&
+	//	req.Method != "HEAD" {
+	//	// Request gzip only, not deflate. Deflate is ambiguous and
+	//	// not as universally supported anyway.
+	//	// See: https://zlib.net/zlib_faq.html#faq39
+	//	//
+	//	// Note that we don't request this for HEAD requests,
+	//	// due to a bug in nginx:
+	//	//   https://trac.nginx.org/nginx/ticket/358
+	//	//   https://golang.org/issue/5522
+	//	//
+	//	// We don't request gzip if the request is for a range, since
+	//	// auto-decoding a portion of a gzipped document will just fail
+	//	// anyway. See https://golang.org/issue/8923
+	//	requestedGzip = true
+	//	req.extraHeaders().Set("Accept-Encoding", "gzip")
+	//}
 
 	// The 100-continue operation in Hyper is handled in the newHyperRequest function.
 
@@ -1126,14 +1126,15 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 				}
 				resp.Body = body
 
-				// TODO(spongehah) gzip fail(readWriteLoop)
-				if rc.addedGzip && EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
-					resp.Body = &gzipReader{body: body}
-					resp.Header.Del("Content-Encoding")
-					resp.Header.Del("Content-Length")
-					resp.ContentLength = -1
-					resp.Uncompressed = true
-				}
+				// TODO(spongehah) gzip(pc.readWriteLoop)
+				//if rc.addedGzip && EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+				//	println("gzip reader")
+				//	resp.Body = &gzipReader{body: body}
+				//	resp.Header.Del("Content-Encoding")
+				//	resp.Header.Del("Content-Length")
+				//	resp.ContentLength = -1
+				//	resp.Uncompressed = true
+				//}
 
 				rw.waitForBodyRead = waitForBodyRead
 				rw.rc = rc

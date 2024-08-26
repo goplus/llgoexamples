@@ -16,7 +16,7 @@ func main() {
 	}
 
 	//req.Header.Set("accept", "*/*")
-	req.Header.Set("accept-encoding", "identity")
+	req.Header.Set("accept-encoding", "gzip")
 	//req.Header.Set("cache-control", "no-cache")
 	//req.Header.Set("pragma", "no-cache")
 	//req.Header.Set("priority", "u=0, i")
@@ -36,6 +36,7 @@ func main() {
 		println(err.Error())
 		return
 	}
+	fmt.Println(resp.Status)
 	resp.PrintHeaders()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

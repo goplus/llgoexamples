@@ -14,7 +14,6 @@ import (
 	"golang.org/x/net/idna"
 
 	"github.com/goplus/llgo/c"
-	"github.com/goplus/llgo/c/os"
 	"github.com/goplus/llgoexamples/rust/hyper"
 )
 
@@ -167,54 +166,6 @@ func NewRequestWithContext(ctx context.Context, method, urlStr string, body io.R
 	return req, nil
 }
 
-//func setPostDataNoCopy(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
-//	req := (*postReq)(userdata)
-//	buf := req.hyperBuf.Bytes()
-//	len := req.hyperBuf.Len()
-//	n, err := req.req.Body.Read(unsafe.Slice(buf, len))
-//	if err != nil {
-//		if err == io.EOF {
-//			*chunk = nil
-//			return hyper.PollReady
-//		}
-//		fmt.Println("error reading upload file: ", err)
-//		return hyper.PollError
-//	}
-//	if n > 0 {
-//		*chunk = req.hyperBuf
-//		return hyper.PollReady
-//	}
-//	if n == 0 {
-//		*chunk = nil
-//		return hyper.PollReady
-//	}
-//
-//	fmt.Printf("error reading request body: %s\n", c.GoString(c.Strerror(os.Errno)))
-//	return hyper.PollError
-//}
-
-// setHeaders sets the headers of the request
-func (r *Request) setHeaders(hyperReq *hyper.Request) error {
-	headers := hyperReq.Headers()
-	for key, values := range r.Header {
-		valueLen := len(values)
-		if valueLen > 1 {
-			for _, value := range values {
-				if headers.Add(&[]byte(key)[0], c.Strlen(c.AllocaCStr(key)), &[]byte(value)[0], c.Strlen(c.AllocaCStr(value))) != hyper.OK {
-					return fmt.Errorf("error adding header %s: %s\n", key, value)
-				}
-			}
-		} else if valueLen == 1 {
-			if headers.Set(&[]byte(key)[0], c.Strlen(c.AllocaCStr(key)), &[]byte(values[0])[0], c.Strlen(c.AllocaCStr(values[0]))) != hyper.OK {
-				return fmt.Errorf("error setting header %s: %s\n", key, values[0])
-			}
-		} else {
-			return fmt.Errorf("error setting header %s: empty value\n", key)
-		}
-	}
-	return nil
-}
-
 func (r *Request) expectsContinue() bool {
 	return hasToken(r.Header.get("Expect"), "100-continue")
 }
@@ -289,6 +240,21 @@ func (r *Request) ProtoAtLeast(major, minor int) bool {
 // the Request.
 var errMissingHost = errors.New("http: Request.Write on Request with no Host or URL set")
 
+// NOTE: This is not intended to reflect the actual Go version being used.
+// It was changed at the time of Go 1.1 release because the former User-Agent
+// had ended up blocked by some intrusion detection systems.
+// See https://codereview.appspot.com/7532043.
+const defaultUserAgent = "Go-http-client/1.1"
+
+// Headers that Request.Write handles itself and should be skipped.
+var reqWriteExcludeHeader = map[string]bool{
+	"Host":              true, // not in Header map anyway
+	"User-Agent":        true,
+	"Content-Length":    true,
+	"Transfer-Encoding": true,
+	"Trailer":           true,
+}
+
 // extraHeaders may be nil
 // waitForContinue may be nil
 // always closes body
@@ -301,16 +267,6 @@ func (r *Request) write(usingProxy bool, extraHeader Header, client *hyper.Clien
 	//		})
 	//	}()
 	//}
-
-	//closed := false
-	//defer func() {
-	//	if closed {
-	//		return
-	//	}
-	//	if closeErr := r.closeBody(); closeErr != nil && err == nil {
-	//		err = closeErr
-	//	}
-	//}()
 
 	// Prepare the hyper.Request
 	hyperReq, err := r.newHyperRequest(usingProxy, extraHeader)
@@ -387,9 +343,6 @@ func (r *Request) newHyperRequest(usingProxy bool, extraHeader Header) (*hyper.R
 		return nil, errors.New("net/http: can't write control character in Request.URL")
 	}
 
-
-
-
 	// Prepare the hyper request
 	hyperReq := hyper.NewRequest()
 
@@ -409,29 +362,55 @@ func (r *Request) newHyperRequest(usingProxy bool, extraHeader Header) (*hyper.R
 	if reqHeaders.Set(&[]byte("Host")[0], c.Strlen(c.Str("Host")), &[]byte(host)[0], c.Strlen(c.AllocaCStr(host))) != hyper.OK {
 		return nil, fmt.Errorf("error setting header: Host: %s\n", host)
 	}
-	err = r.setHeaders(hyperReq)
+
+	// Use the defaultUserAgent unless the Header contains one, which
+	// may be blank to not send the header.
+	userAgent := defaultUserAgent
+	if r.Header.has("User-Agent") {
+		userAgent = r.Header.Get("User-Agent")
+	}
+	if userAgent != "" {
+		if reqHeaders.Set(&[]byte("User-Agent")[0], c.Strlen(c.Str("User-Agent")), &[]byte(userAgent)[0], c.Strlen(c.AllocaCStr(userAgent))) != hyper.OK {
+			return nil, fmt.Errorf("error setting header: User-Agent: %s\n", userAgent)
+		}
+	}
+
+	// Process Body,ContentLength,Close,Trailer
+	//tw, err := newTransferWriter(r)
+	//if err != nil {
+	//	return err
+	//}
+	//err = tw.writeHeader(w, trace)
+	err = r.writeHeader(reqHeaders)
 	if err != nil {
 		return nil, err
 	}
 
-	if r.Body != nil {
-		// 100-continue
-		if r.ProtoAtLeast(1, 1) && r.Body != nil && r.expectsContinue() {
-			hyperReq.OnInformational(printInformational, nil)
-		}
+	err = r.Header.writeSubset(reqHeaders, reqWriteExcludeHeader)
+	if err != nil {
+		return nil, err
+	}
 
-		hyperReqBody := hyper.NewBody()
-		//buf := make([]byte, 2)
-		//hyperBuf := hyper.CopyBuf(&buf[0], uintptr(2))
-		reqData := &postReq{
-			req: r,
-			buf: make([]byte, defaultChunkSize),
-			//hyperBuf: hyperBuf,
+	if extraHeader != nil {
+		err = extraHeader.write(reqHeaders)
+		if err != nil {
+			return nil, err
 		}
-		hyperReqBody.SetUserdata(c.Pointer(reqData))
-		hyperReqBody.SetDataFunc(setPostData)
-		//hyperReqBody.SetDataFunc(setPostDataNoCopy)
-		hyperReq.SetBody(hyperReqBody)
+	}
+
+	//if trace != nil && trace.WroteHeaders != nil {
+	//	trace.WroteHeaders()
+	//}
+
+	// Wait for 100-continue if expected.
+	if r.ProtoAtLeast(1, 1) && r.Body != nil && r.expectsContinue() {
+		hyperReq.OnInformational(printInformational, nil)
+	}
+
+	// Write body and trailer
+	err = r.writeBody(hyperReq)
+	if err != nil {
+		return nil, err
 	}
 
 	return hyperReq, nil
@@ -440,41 +419,6 @@ func (r *Request) newHyperRequest(usingProxy bool, extraHeader Header) (*hyper.R
 func printInformational(userdata c.Pointer, resp *hyper.Response) {
 	status := resp.Status()
 	fmt.Println("Informational (1xx): ", status)
-}
-
-type postReq struct {
-	req *Request
-	buf []byte
-	//hyperBuf *hyper.Buf
-}
-
-func setPostData(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
-	req := (*postReq)(userdata)
-	n, err := req.req.Body.Read(req.buf)
-	if err != nil {
-		if err == io.EOF {
-			println("EOF")
-			*chunk = nil
-			req.req.Body.Close()
-			return hyper.PollReady
-		}
-		fmt.Println("error reading request body: ", err)
-		return hyper.PollError
-	}
-	if n > 0 {
-		*chunk = hyper.CopyBuf(&req.buf[0], uintptr(n))
-		return hyper.PollReady
-	}
-	if n == 0 {
-		println("n == 0")
-		*chunk = nil
-		req.req.Body.Close()
-		return hyper.PollReady
-	}
-
-	req.req.Body.Close()
-	fmt.Printf("error reading request body: %s\n", c.GoString(c.Strerror(os.Errno)))
-	return hyper.PollError
 }
 
 func validMethod(method string) bool {

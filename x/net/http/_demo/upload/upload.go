@@ -10,7 +10,9 @@ import (
 
 func main() {
 	url := "http://httpbin.org/post"
+	//url := "http://localhost:8080"
 	filePath := "/Users/spongehah/go/src/llgo/x/net/http/_demo/upload/example.txt" // Replace with your file path
+	//filePath := "/Users/spongehah/Downloads/xiaoshuo.txt" // Replace with your file path
 
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -33,7 +35,8 @@ func main() {
 		return
 	}
 	defer resp.Body.Close()
-
+	fmt.Println("Status:", resp.Status)
+	resp.PrintHeaders()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Println(err)

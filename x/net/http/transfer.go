@@ -5,10 +5,15 @@ import (
 	"fmt"
 	"io"
 	"net/textproto"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"github.com/goplus/llgo/c"
+	"github.com/goplus/llgo/c/os"
+	"github.com/goplus/llgoexamples/rust/hyper"
 )
 
 type transferReader struct {
@@ -610,3 +615,108 @@ func lowerASCII(b byte) byte {
 // isOWS reports whether b is an optional whitespace byte, as defined
 // by RFC 7230 section 3.2.3.
 func isOWS(b byte) bool { return b == ' ' || b == '\t' }
+
+// writeHeader Write Content-Length and/or Transfer-Encoding and/or Trailer header
+func (r *Request) writeHeader(reqHeaders *hyper.Headers) error {
+	if r.Close && !hasToken(r.Header.get("Connection"), "close") {
+		if reqHeaders.Set(&[]byte("Connection")[0], c.Strlen(c.Str("Connection")), &[]byte("close")[0], c.Strlen(c.Str("close"))) != hyper.OK {
+			return fmt.Errorf("error setting header: Connection: %s\n", "close")
+		}
+	}
+
+	// 'Content-Length' and 'Transfer-Encoding:chunked' are already handled by hyper
+
+	// Write Trailer header
+	// TODO(spongehah) Trailer(writeHeader)
+
+	return nil
+}
+
+var nopCloserType = reflect.TypeOf(io.NopCloser(nil))
+var nopCloserWriterToType = reflect.TypeOf(io.NopCloser(struct {
+	io.Reader
+	io.WriterTo
+}{}))
+
+// unwrapNopCloser return the underlying reader and true if r is a NopCloser
+// else it return false.
+func unwrapNopCloser(r io.Reader) (underlyingReader io.Reader, isNopCloser bool) {
+	switch reflect.TypeOf(r) {
+	case nopCloserType, nopCloserWriterToType:
+		return reflect.ValueOf(r).Field(0).Interface().(io.Reader), true
+	default:
+		return nil, false
+	}
+}
+
+// unwrapBody unwraps the body's inner reader if it's a
+// nopCloser. This is to ensure that body writes sourced from local
+// files (*os.File types) are properly optimized.
+//
+// This function is only intended for use in writeBody.
+func (req *Request) unwrapBody() io.Reader {
+	if r, ok := unwrapNopCloser(req.Body); ok {
+		return r
+	}
+	if r, ok := req.Body.(*readTrackingBody); ok {
+		r.didRead = true
+		return r.ReadCloser
+	}
+	return req.Body
+}
+
+func (r *Request) writeBody(hyperReq *hyper.Request) error {
+	if r.Body != nil {
+		var body = r.unwrapBody()
+		hyperReqBody := hyper.NewBody()
+		buf := make([]byte, defaultChunkSize)
+		//hyperBuf := hyper.CopyBuf(&buf[0], uintptr(defaultChunkSize))
+		reqData := &bodyReq{
+			body: body,
+			buf:  buf,
+			//hyperBuf: hyperBuf,
+			closeBody: r.closeBody,
+		}
+		hyperReqBody.SetUserdata(c.Pointer(reqData))
+		hyperReqBody.SetDataFunc(setPostData)
+		hyperReq.SetBody(hyperReqBody)
+	}
+	return nil
+}
+
+type bodyReq struct {
+	body io.Reader
+	buf  []byte
+	//hyperBuf *hyper.Buf
+	closeBody func() error
+}
+
+func setPostData(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
+	req := (*bodyReq)(userdata)
+	n, err := req.body.Read(req.buf)
+	//buf := req.hyperBuf.Bytes()
+	//bufLen := req.hyperBuf.Len()
+	//n, err := req.body.Read(unsafe.Slice(buf, bufLen))
+	if err != nil {
+		if err == io.EOF {
+			*chunk = nil
+			req.closeBody()
+			return hyper.PollReady
+		}
+		fmt.Println("error reading request body: ", err)
+		return hyper.PollError
+	}
+	if n > 0 {
+		*chunk = hyper.CopyBuf(&req.buf[0], uintptr(n))
+		//*chunk = req.hyperBuf
+		return hyper.PollReady
+	}
+	if n == 0 {
+		*chunk = nil
+		req.closeBody()
+		return hyper.PollReady
+	}
+	req.closeBody()
+	fmt.Printf("error reading request body: %s\n", c.GoString(c.Strerror(os.Errno)))
+	return hyper.PollError
+}

@@ -14,7 +14,6 @@ func main() {
 		return
 	}
 	fmt.Println(resp.Status, "read bytes: ", resp.ContentLength)
-	fmt.Println(resp.Proto)
 	resp.PrintHeaders()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

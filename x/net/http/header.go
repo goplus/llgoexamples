@@ -3,6 +3,9 @@ package http
 import (
 	"fmt"
 	"net/textproto"
+	"sort"
+	"strings"
+	"sync"
 
 	"github.com/goplus/llgo/c"
 	"github.com/goplus/llgoexamples/rust/hyper"
@@ -106,6 +109,94 @@ func (h Header) Clone() Header {
 		sv = sv[n:]
 	}
 	return h2
+}
+
+var headerNewlineToSpace = strings.NewReplacer("\n", " ", "\r", " ")
+
+type keyValues struct {
+	key    string
+	values []string
+}
+
+// A headerSorter implements sort.Interface by sorting a []keyValues
+// by key. It's used as a pointer, so it can fit in a sort.Interface
+// interface value without allocation.
+type headerSorter struct {
+	kvs []keyValues
+}
+
+func (s *headerSorter) Len() int           { return len(s.kvs) }
+func (s *headerSorter) Swap(i, j int)      { s.kvs[i], s.kvs[j] = s.kvs[j], s.kvs[i] }
+func (s *headerSorter) Less(i, j int) bool { return s.kvs[i].key < s.kvs[j].key }
+
+var headerSorterPool = sync.Pool{
+	New: func() any { return new(headerSorter) },
+}
+
+// sortedKeyValues returns h's keys sorted in the returned kvs
+// slice. The headerSorter used to sort is also returned, for possible
+// return to headerSorterCache.
+func (h Header) sortedKeyValues(exclude map[string]bool) (kvs []keyValues, hs *headerSorter) {
+	hs = headerSorterPool.Get().(*headerSorter)
+	if cap(hs.kvs) < len(h) {
+		hs.kvs = make([]keyValues, 0, len(h))
+	}
+	kvs = hs.kvs[:0]
+	for k, vv := range h {
+		if !exclude[k] {
+			kvs = append(kvs, keyValues{k, vv})
+		}
+	}
+	hs.kvs = kvs
+	sort.Sort(hs)
+	return kvs, hs
+}
+
+// Write writes a header in wire format.
+func (h Header) Write(reqHeaders *hyper.Headers) error {
+	return h.write(reqHeaders)
+}
+
+func (h Header) write(reqHeaders *hyper.Headers) error {
+	return h.writeSubset(reqHeaders, nil)
+}
+
+// WriteSubset writes a header in wire format.
+// If exclude is not nil, keys where exclude[key] == true are not written.
+// Keys are not canonicalized before checking the exclude map.
+func (h Header) WriteSubset(reqHeaders *hyper.Headers, exclude map[string]bool) error {
+	return h.writeSubset(reqHeaders, exclude)
+}
+
+func (h Header) writeSubset(reqHeaders *hyper.Headers, exclude map[string]bool) error {
+	kvs, sorter := h.sortedKeyValues(exclude)
+	for _, kv := range kvs {
+		if !ValidHeaderFieldName(kv.key) {
+			// This could be an error. In the common case of
+			// writing response headers, however, we have no good
+			// way to provide the error back to the server
+			// handler, so just drop invalid headers instead.
+			continue
+		}
+		for _, v := range kv.values {
+			v = headerNewlineToSpace.Replace(v)
+			v = textproto.TrimString(v)
+			if reqHeaders.Add(&[]byte(kv.key)[0], c.Strlen(c.AllocaCStr(kv.key)), &[]byte(v)[0], c.Strlen(c.AllocaCStr(v))) != hyper.OK {
+				headerSorterPool.Put(sorter)
+				return fmt.Errorf("error adding header %s: %s\n", kv.key, v)
+			}
+			//if trace != nil && trace.WroteHeaderField != nil {
+			//	formattedVals = append(formattedVals, v)
+			//}
+		}
+		//if trace != nil && trace.WroteHeaderField != nil {
+		//	trace.WroteHeaderField(kv.key, formattedVals)
+		//	formattedVals = nil
+		//}
+	}
+
+	headerSorterPool.Put(sorter)
+	return nil
 }
 
 // hasToken reports whether token appears with v, ASCII
