@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/url"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -158,6 +159,9 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 				Host:     host,
 				Cancel:   ireq.Cancel,
 				ctx:      ireq.ctx,
+
+				timer:     ireq.timer,
+				timeoutch: ireq.timeoutch,
 			}
 			if includeBody && ireq.GetBody != nil {
 				req.Body, err = ireq.GetBody()
@@ -305,11 +309,14 @@ func send(ireq *Request, rt RoundTripper, deadline time.Time) (resp *Response, d
 	}
 
 	// TODO(spongehah) timeout(send)
-	req.timeoutch = make(chan struct{}, 1)
+	req.deadline = deadline
+	if deadline.IsZero() {
+		didTimeout = alwaysFalse
+	} else {
+		didTimeout = func() bool { return req.timer.GetDueIn() == 0 }
+	}
 	//stopTimer, didTimeout := setRequestCancel(req, rt, deadline)
 
-	sub := deadline.Sub(time.Now())
-	req.timeout = sub
 	resp, err = rt.RoundTrip(req)
 	if err != nil {
 		//stopTimer()
@@ -469,6 +476,34 @@ func (b *cancelTimerBody) Close() error {
 	return err
 }
 
+// knownRoundTripperImpl reports whether rt is a RoundTripper that's
+// maintained by the Go team and known to implement the latest
+// optional semantics (notably contexts). The Request is used
+// to check whether this particular request is using an alternate protocol,
+// in which case we need to check the RoundTripper for that protocol.
+func knownRoundTripperImpl(rt RoundTripper, req *Request) bool {
+	switch t := rt.(type) {
+	case *Transport:
+		if altRT := t.alternateRoundTripper(req); altRT != nil {
+			return knownRoundTripperImpl(altRT, req)
+		}
+		return true
+		// TODO(spongehah)
+		//case *http2Transport, http2noDialH2RoundTripper:
+		//	return true
+	}
+	// There's a very minor chance of a false positive with this.
+	// Instead of detecting our golang.org/x/net/http2.Transport,
+	// it might detect a Transport type in a different http2
+	// package. But I know of none, and the only problem would be
+	// some temporarily leaked goroutines if the transport didn't
+	// support contexts. So this is a good enough heuristic:
+	if reflect.TypeOf(rt).String() == "*http2.Transport" {
+		return true
+	}
+	return false
+}
+
 // setRequestCancel sets req.Cancel and adds a deadline context to req
 // if deadline is non-zero. The RoundTripper's type is used to
 // determine whether the legacy CancelRequest behavior should be used.
@@ -482,11 +517,10 @@ func setRequestCancel(req *Request, rt RoundTripper, deadline time.Time) (stopTi
 	if deadline.IsZero() {
 		return nop, alwaysFalse
 	}
-	//knownTransport := knownRoundTripperImpl(rt, req)
+	knownTransport := knownRoundTripperImpl(rt, req)
 	oldCtx := req.Context()
 
-	//if req.Cancel == nil && knownTransport {
-	if req.Cancel == nil {
+	if req.Cancel == nil && knownTransport {
 		// If they already had a Request.Context that's
 		// expiring sooner, do nothing:
 		if !timeBeforeContextDeadline(deadline, oldCtx) {
@@ -504,7 +538,7 @@ func setRequestCancel(req *Request, rt RoundTripper, deadline time.Time) (stopTi
 		req.ctx, cancelCtx = context.WithDeadline(oldCtx, deadline)
 	}
 
-	cancel := make(chan struct{}, 1)
+	cancel := make(chan struct{})
 	req.Cancel = cancel
 
 	doCancel := func() {
@@ -518,7 +552,7 @@ func setRequestCancel(req *Request, rt RoundTripper, deadline time.Time) (stopTi
 		}
 	}
 
-	stopTimerCh := make(chan struct{}, 1)
+	stopTimerCh := make(chan struct{})
 	var once sync.Once
 	stopTimer = func() {
 		once.Do(func() {

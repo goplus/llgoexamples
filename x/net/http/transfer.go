@@ -670,11 +670,9 @@ func (r *Request) writeBody(hyperReq *hyper.Request) error {
 		var body = r.unwrapBody()
 		hyperReqBody := hyper.NewBody()
 		buf := make([]byte, defaultChunkSize)
-		//hyperBuf := hyper.CopyBuf(&buf[0], uintptr(defaultChunkSize))
 		reqData := &bodyReq{
-			body: body,
-			buf:  buf,
-			//hyperBuf: hyperBuf,
+			body:      body,
+			buf:       buf,
 			closeBody: r.closeBody,
 		}
 		hyperReqBody.SetUserdata(c.Pointer(reqData))
@@ -685,18 +683,14 @@ func (r *Request) writeBody(hyperReq *hyper.Request) error {
 }
 
 type bodyReq struct {
-	body io.Reader
-	buf  []byte
-	//hyperBuf *hyper.Buf
+	body      io.Reader
+	buf       []byte
 	closeBody func() error
 }
 
 func setPostData(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
 	req := (*bodyReq)(userdata)
 	n, err := req.body.Read(req.buf)
-	//buf := req.hyperBuf.Bytes()
-	//bufLen := req.hyperBuf.Len()
-	//n, err := req.body.Read(unsafe.Slice(buf, bufLen))
 	if err != nil {
 		if err == io.EOF {
 			*chunk = nil
@@ -708,7 +702,6 @@ func setPostData(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.In
 	}
 	if n > 0 {
 		*chunk = hyper.CopyBuf(&req.buf[0], uintptr(n))
-		//*chunk = req.hyperBuf
 		return hyper.PollReady
 	}
 	if n == 0 {

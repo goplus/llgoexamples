@@ -73,6 +73,7 @@ func appendToResponseBody(userdata c.Pointer, chunk *hyper.Buf) c.Int {
 	_, err := writer.Write(bytes)
 	if err != nil {
 		fmt.Println("Error writing to response body:", err)
+		writer.Close()
 		return hyper.IterBreak
 	}
 	return hyper.IterContinue

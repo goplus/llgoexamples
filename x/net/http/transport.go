@@ -10,14 +10,15 @@ import (
 	"net/url"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/goplus/llgo/c"
 	"github.com/goplus/llgo/c/libuv"
 	cnet "github.com/goplus/llgo/c/net"
 	"github.com/goplus/llgo/c/syscall"
+	"github.com/goplus/llgo/x/net"
 	"github.com/goplus/llgoexamples/rust/hyper"
-	"github.com/goplus/llgoexamples/x/net"
 )
 
 // DefaultTransport is the default implementation of Transport and is
@@ -33,7 +34,7 @@ var DefaultTransport RoundTripper = &Transport{
 // DefaultMaxIdleConnsPerHost is the default value of Transport's
 // MaxIdleConnsPerHost.
 const DefaultMaxIdleConnsPerHost = 2
-const defaultHTTPPort = "80"
+const debugSwitch = true
 
 type Transport struct {
 	altProto    atomic.Value // of nil or map[string]RoundTripper, key is URI scheme
@@ -68,6 +69,11 @@ type Transport struct {
 	//
 	// Zero means no limit.
 	MaxConnsPerHost int
+
+	// libuv and hyper related
+	loopInitOnce sync.Once
+	loop         *libuv.Loop
+	exec         *hyper.Executor
 }
 
 // A cancelKey is the key of the reqCanceler map.
@@ -82,29 +88,6 @@ type cancelKey struct {
 // any size (as long as it's first).
 type incomparable [0]func()
 
-type requestAndChan struct {
-	_         incomparable
-	req       *Request
-	cancelKey cancelKey
-	ch        chan responseAndError // unbuffered; always send in select on callerGone
-
-	// whether the Transport (as opposed to the user client code)
-	// added the Accept-Encoding gzip header. If the Transport
-	// set it, only then do we transparently decode the gzip.
-	addedGzip bool
-
-	callerGone <-chan struct{} // closed when roundTrip caller has returned
-}
-
-// A writeRequest is sent by the caller's goroutine to the
-// writeLoop's goroutine to write a request while the read loop
-// concurrently waits on both the write response and the server's
-// reply.
-type writeRequest struct {
-	req *transportRequest
-	ch  chan<- error
-}
-
 // responseAndError is how the goroutine reading from an HTTP/1 server
 // communicates with the goroutine doing the RoundTrip.
 type responseAndError struct {
@@ -113,10 +96,9 @@ type responseAndError struct {
 	err error
 }
 
-type connAndTimeoutChan struct {
-	_         incomparable
-	conn      *connData
+type timeoutData struct {
 	timeoutch chan struct{}
+	taskData  *taskData
 }
 
 type readTrackingBody struct {
@@ -205,8 +187,6 @@ func (t *Transport) connectMethodForRequest(treq *transportRequest) (cm connectM
 	if t.Proxy != nil {
 		cm.proxyURL, err = t.Proxy(treq.Request)
 	}
-	// TODO(spongehah) cm.treq(connectMethod)
-	cm.treq = treq
 	cm.onlyH1 = treq.requiresHTTP1()
 	return cm, err
 }
@@ -293,9 +273,110 @@ func (t *Transport) cancelRequest(key cancelKey, err error) bool {
 	return cancel != nil
 }
 
+func (t *Transport) close(err error) {
+	t.reqMu.Lock()
+	defer t.reqMu.Unlock()
+	t.closeLocked(err)
+}
+
+func (t *Transport) closeLocked(err error) {
+	if err != nil {
+		fmt.Println(err)
+	}
+	if t.loop != nil {
+		t.loop.Close()
+	}
+	if t.exec != nil {
+		t.exec.Free()
+	}
+}
+
+func getMilliseconds(deadline time.Time) uint64 {
+	microseconds := deadline.Sub(time.Now()).Microseconds()
+	milliseconds := microseconds / 1e3
+	if microseconds%1e3 != 0 {
+		milliseconds += 1
+	}
+	return uint64(milliseconds)
+}
+
 // ----------------------------------------------------------
 
 func (t *Transport) RoundTrip(req *Request) (*Response, error) {
+	if debugSwitch {
+		println("RoundTrip start")
+		defer println("RoundTrip end")
+	}
+	t.loopInitOnce.Do(func() {
+		t.loop = libuv.LoopNew()
+		t.exec = hyper.NewExecutor()
+
+		//idle := &libuv.Idle{}
+		//libuv.InitIdle(t.loop, idle)
+		//(*libuv.Handle)(c.Pointer(idle)).SetData(c.Pointer(t))
+		//idle.Start(readWriteLoop)
+
+		checker := &libuv.Check{}
+		libuv.InitCheck(t.loop, checker)
+		(*libuv.Handle)(c.Pointer(checker)).SetData(c.Pointer(t))
+		checker.Start(readWriteLoop)
+
+		go t.loop.Run(libuv.RUN_DEFAULT)
+	})
+
+	// If timeout is set, start the timer
+	var didTimeout func() bool
+	var stopTimer func()
+	// Only the first request will initialize the timer
+	if req.timer == nil && !req.deadline.IsZero() {
+		req.timer = &libuv.Timer{}
+		req.timeoutch = make(chan struct{}, 1)
+		libuv.InitTimer(t.loop, req.timer)
+		ch := &timeoutData{
+			timeoutch: req.timeoutch,
+			taskData:  nil,
+		}
+		(*libuv.Handle)(c.Pointer(req.timer)).SetData(c.Pointer(ch))
+
+		req.timer.Start(onTimeout, getMilliseconds(req.deadline), 0)
+		if debugSwitch {
+			println("timer start")
+		}
+		didTimeout = func() bool { return req.timer.GetDueIn() == 0 }
+		stopTimer = func() {
+			close(req.timeoutch)
+			req.timer.Stop()
+			(*libuv.Handle)(c.Pointer(req.timer)).Close(nil)
+			if debugSwitch {
+				println("timer close")
+			}
+		}
+	} else {
+		didTimeout = alwaysFalse
+		stopTimer = nop
+	}
+
+	resp, err := t.doRoundTrip(req)
+	if err != nil {
+		stopTimer()
+		return nil, err
+	}
+
+	if !req.deadline.IsZero() {
+		resp.Body = &cancelTimerBody{
+			stop:          stopTimer,
+			rc:            resp.Body,
+			reqDidTimeout: didTimeout,
+		}
+	}
+	return resp, nil
+}
+
+func (t *Transport) doRoundTrip(req *Request) (*Response, error) {
+	if debugSwitch {
+		println("doRoundTrip start")
+		defer println("doRoundTrip end")
+	}
 	//t.nextProtoOnce.Do(t.onceSetNextProtoDefaults)
 	//ctx := req.Context()
 	//trace := httptrace.ContextClientTrace(ctx)
@@ -354,13 +435,19 @@ func (t *Transport) RoundTrip(req *Request) (*Response, error) {
 	}
 
 	for {
-		// TODO(spongehah) timeout(t.RoundTrip): because of that ctx not initialized ( initialized in setRequestCancel() )
+		// TODO(spongehah) timeout(t.doRoundTrip)
 		//select {
 		//case <-ctx.Done():
 		//	req.closeBody()
 		//	return nil, ctx.Err()
 		//default:
 		//}
+		select {
+		case <-req.timeoutch:
+			req.closeBody()
+			return nil, errors.New("request timeout!")
+		default:
+		}
 
 		// treq gets modified by roundTrip, so we need to recreate for each retry.
 		//treq := &transportRequest{Request: req, trace: trace, cancelKey: cancelKey}
@@ -376,6 +463,7 @@ func (t *Transport) RoundTrip(req *Request) (*Response, error) {
 		// pre-CONNECTed to https server. In any case, we'll be ready
 		// to send it requests.
 		pconn, err := t.getConn(treq, cm)
+
 		if err != nil {
 			t.setReqCanceler(cancelKey, nil)
 			req.closeBody()
@@ -390,19 +478,24 @@ func (t *Transport) RoundTrip(req *Request) (*Response, error) {
 		} else {
 			resp, err = pconn.roundTrip(treq)
 		}
+
 		if err == nil {
 			resp.Request = origReq
 			return resp, nil
 		}
 
 		// Failed. Clean up and determine whether to retry.
-		// TODO(spongehah) Retry & ConnPool(t.RoundTrip)
+		// TODO(spongehah) Retry & ConnPool(t.doRoundTrip)
 		return nil, err
 	}
 }
 
 func (t *Transport) getConn(treq *transportRequest, cm connectMethod) (pc *persistConn, err error) {
-	//req := treq.Request
+	if debugSwitch {
+		println("getConn start")
+		defer println("getConn end")
+	}
+	req := treq.Request
 	//trace := treq.trace
 	//ctx := req.Context()
 	//if trace != nil && trace.GetConn != nil {
@@ -413,6 +506,7 @@ func (t *Transport) getConn(treq *transportRequest, cm connectMethod) (pc *persi
 		cm:  cm,
 		key: cm.key(),
 		//ctx:        ctx,
+		timeoutch:  treq.timeoutch,
 		ready:      make(chan struct{}, 1),
 		beforeDial: testHookPrePendingDial,
 		afterDial:  testHookPostPendingDial,
@@ -458,10 +552,13 @@ func (t *Transport) getConn(treq *transportRequest, cm connectMethod) (pc *persi
 			// what caused w.err; if so, prefer to return the
 			// cancellation error (see golang.org/issue/16049).
 			select {
+			// TODO(spongehah) cancel(t.getConn)
 			//case <-req.Cancel:
 			//	return nil, errRequestCanceledConn
 			//case <-req.Context().Done():
 			//	return nil, req.Context().Err()
+			case <-req.timeoutch:
+				return nil, errors.New("timeout: req.Context().Err()")
 			case err := <-cancelc:
 				if err == errRequestCanceled {
 					err = errRequestCanceledConn
@@ -475,10 +572,13 @@ func (t *Transport) getConn(treq *transportRequest, cm connectMethod) (pc *persi
 	// TODO(spongehah) cancel(t.getConn)
 	//case <-req.Cancel:
 	//	return nil, errRequestCanceledConn
-	case <-treq.Request.timeoutch:
-		return nil, fmt.Errorf("request timeout\n")
 	//case <-req.Context().Done():
-	//	return nil, req.Context().Err()
+	//	return nil,
+	case <-req.timeoutch:
+		if debugSwitch {
+			println("getConn: timeoutch")
+		}
+		return nil, errors.New("timeout: req.Context().Err()\n")
 	case err := <-cancelc:
 		if err == errRequestCanceled {
 			err = errRequestCanceledConn
@@ -490,6 +590,10 @@ func (t *Transport) getConn(treq *transportRequest, cm connectMethod) (pc *persi
 // queueForDial queues w to wait for permission to begin dialing.
 // Once w receives permission to dial, it will do so in a separate goroutine.
 func (t *Transport) queueForDial(w *wantConn) {
+	if debugSwitch {
+		println("queueForDial start")
+		defer println("queueForDial end")
+	}
 	w.beforeDial()
 
 	if t.MaxConnsPerHost <= 0 {
@@ -522,9 +626,13 @@ func (t *Transport) queueForDial(w *wantConn) {
 // dialConnFor has received permission to dial w.cm and is counted in t.connCount[w.cm.key()].
 // If the dial is canceled or unsuccessful, dialConnFor decrements t.connCount[w.cm.key()].
 func (t *Transport) dialConnFor(w *wantConn) {
+	if debugSwitch {
+		println("dialConnFor start")
+		defer println("dialConnFor end")
+	}
 	defer w.afterDial()
 
-	pc, err := t.dialConn(w.ctx, w.cm)
+	pc, err := t.dialConn(w.timeoutch, w.cm)
 	w.tryDeliver(pc, err)
 	// TODO(spongehah) ConnPool(t.dialConnFor)
 	//delivered := w.tryDeliver(pc, err)
@@ -593,12 +701,19 @@ func (t *Transport) decConnsPerHost(key connectMethodKey) {
 	}
 }
 
-func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *persistConn, err error) {
+func (t *Transport) dialConn(timeoutch chan struct{}, cm connectMethod) (pconn *persistConn, err error) {
+	if debugSwitch {
+		println("dialConn start")
+		defer println("dialConn end")
+	}
+	select {
+	case <-timeoutch:
+		return
+	default:
+	}
 	pconn = &persistConn{
 		t:             t,
 		cacheKey:      cm.key(),
-		reqch:         make(chan requestAndChan, 1),
-		writech:       make(chan writeRequest, 1),
 		closech:       make(chan struct{}, 1),
 		writeLoopDone: make(chan struct{}, 1),
 	}
@@ -611,7 +726,7 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 	//	}
 	//	return err
 	//}
-
+	//
 	//if cm.scheme() == "https" && t.hasCustomTLSDialer() {
 	//	var err error
 	//	pconn.conn, err = t.customDialTLS(ctx, "tcp", cm.addr())
@@ -639,26 +754,11 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 	//	}
 	//} else {
 	//conn, err := t.dial(ctx, "tcp", cm.addr())
-	conn, err := t.dial(ctx, cm)
+	conn, err := t.dial(timeoutch, cm.addr())
 	if err != nil {
 		return nil, err
 	}
 	pconn.conn = conn
-
-	// hyper specific
-	// Hookup the IO
-	hyperIo := newIoWithConnReadWrite(conn)
-	// We need an executor generally to poll futures
-	exec := hyper.NewExecutor()
-	// Prepare client options
-	opts := hyper.NewClientConnOptions()
-	opts.Exec(exec)
-	pconn.exec = exec
-	// send the handshake
-	handshakeTask := hyper.Handshake(hyperIo, opts)
-	setTaskId(handshakeTask, write)
-	// Let's wait for the handshake to finish...
-	exec.Push(handshakeTask)
 
 	//if cm.scheme() == "https" {
 	//	var firstTLSHost string
@@ -670,7 +770,12 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 	//	}
 	//}
 	//}
-
+	select {
+	case <-timeoutch:
+		conn.Close()
+		return
+	default:
+	}
 	// TODO(spongehah) Proxy(https/sock5)(t.dialConn)
 	// Proxy setup.
 	switch {
@@ -704,36 +809,28 @@ func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *pers
 	//	}
 	//}
 
-	go pconn.readWriteLoop(libuv.DefaultLoop())
-
+	select {
+	case <-timeoutch:
+		conn.Close()
+		return
+	default:
+	}
 	return pconn, nil
 }
 
-func (t *Transport) dial(ctx context.Context, cm connectMethod) (*connData, error) {
-	treq := cm.treq
-	host := treq.URL.Hostname()
-	port := treq.URL.Port()
-	if port == "" {
-		port = defaultHTTPPort
+func (t *Transport) dial(timeoutch chan struct{}, addr string) (*connData, error) {
+	if debugSwitch {
+		println("dial start")
+		defer println("dial end")
 	}
-	loop := libuv.DefaultLoop()
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+
 	conn := new(connData)
-	if conn == nil {
-		return nil, fmt.Errorf("Failed to allocate memory for conn_data\n")
-	}
 
-	// If timeout is set, start the timer
-	if treq.timeout > 0 {
-		libuv.InitTimer(loop, &conn.TimeoutTimer)
-		ct := &connAndTimeoutChan{
-			conn:      conn,
-			timeoutch: treq.Request.timeoutch,
-		}
-		(*libuv.Handle)(c.Pointer(&conn.TimeoutTimer)).SetData(c.Pointer(ct))
-		conn.TimeoutTimer.Start(onTimeout, uint64(treq.timeout.Milliseconds()), 0)
-	}
-
-	libuv.InitTcp(loop, &conn.TcpHandle)
+	libuv.InitTcp(t.loop, &conn.TcpHandle)
 	(*libuv.Handle)(c.Pointer(&conn.TcpHandle)).SetData(c.Pointer(conn))
 
 	var hints cnet.AddrInfo
@@ -744,14 +841,12 @@ func (t *Transport) dial(ctx context.Context, cm connectMethod) (*connData, erro
 	var res *cnet.AddrInfo
 	status := cnet.Getaddrinfo(c.AllocaCStr(host), c.AllocaCStr(port), &hints, &res)
 	if status != 0 {
-		close(treq.Request.timeoutch)
 		return nil, fmt.Errorf("getaddrinfo error\n")
 	}
 
 	(*libuv.Req)(c.Pointer(&conn.ConnectReq)).SetData(c.Pointer(conn))
 	status = libuv.TcpConnect(&conn.ConnectReq, &conn.TcpHandle, res.Addr, onConnect)
 	if status != 0 {
-		close(treq.Request.timeoutch)
 		return nil, fmt.Errorf("connect error: %s\n", c.GoString(libuv.Strerror(libuv.Errno(status))))
 	}
 
@@ -760,6 +855,10 @@ func (t *Transport) dial(ctx context.Context, cm connectMethod) (*connData, erro
 }
 
 func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err error) {
+	if debugSwitch {
+		println("roundTrip start")
+		defer println("roundTrip end")
+	}
 	testHookEnterRoundTrip()
 	if !pc.t.replaceReqCanceler(req.cancelKey, pc.cancelRequest) {
 		// TODO(spongehah) ConnPool(pc.roundTrip)
@@ -819,43 +918,61 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 		}
 	}()
 
-	const debugRoundTrip = false // Debug switch provided for developers
-
 	// Write the request concurrently with waiting for a response,
 	// in case the server decides to reply before reading our full
 	// request body.
-
-	// In Hyper, the writeLoop() and readLoop() are combined together --> readWriteLoop().
 	startBytesWritten := pc.conn.nwrite
 	writeErrCh := make(chan error, 1)
-	pc.writech <- writeRequest{req: req, ch: writeErrCh}
-
-	// Send the request to readWriteLoop().
 	resc := make(chan responseAndError, 1)
-	pc.reqch <- requestAndChan{
-		req:        req.Request,
-		cancelKey:  req.cancelKey,
-		ch:         resc,
+
+	// Hookup the IO
+	hyperIo := newIoWithConnReadWrite(pc.conn)
+	// We need an executor generally to poll futures
+	// Prepare client options
+	opts := hyper.NewClientConnOptions()
+	opts.Exec(pc.t.exec)
+	// send the handshake
+	handshakeTask := hyper.Handshake(hyperIo, opts)
+	taskData := &taskData{
+		taskId:     write,
+		req:        req,
+		pc:         pc,
 		addedGzip:  requestedGzip,
+		writeErrCh: writeErrCh,
 		callerGone: gone,
+		resc:       resc,
 	}
+	handshakeTask.SetUserdata(c.Pointer(taskData))
+	// Send the request to readWriteLoop().
+	// Let's wait for the handshake to finish...
+
+	pc.t.exec.Push(handshakeTask)
+	async := &libuv.Async{}
+	pc.t.loop.Async(async, asyncCb)
+	async.Send()
 
 	//var respHeaderTimer <-chan time.Time
 	//cancelChan := req.Request.Cancel
 	//ctxDoneChan := req.Context().Done()
+	timeoutch := req.timeoutch
 	pcClosed := pc.closech
 	canceled := false
 
 	for {
 		testHookWaitResLoop()
-
+		if debugSwitch {
+			println("roundTrip for")
+		}
 		select {
 		case err := <-writeErrCh:
-			if debugRoundTrip {
-				//req.logf("writeErrCh resv: %T/%#v", err, err)
+			if debugSwitch {
+				println("roundTrip: writeErrch")
 			}
 			if err != nil {
 				pc.close(fmt.Errorf("write error: %w", err))
+				if pc.conn.nwrite == startBytesWritten {
+					err = nothingWrittenError{err}
+				}
 				return nil, pc.mapRoundTripError(req, startBytesWritten, err)
 			}
 			//if d := pc.t.ResponseHeaderTimeout; d > 0 {
@@ -867,69 +984,53 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 			//	respHeaderTimer = timer.C
 			//}
 		case <-pcClosed:
+			if debugSwitch {
+				println("roundTrip: pcClosed")
+			}
 			pcClosed = nil
 			if canceled || pc.t.replaceReqCanceler(req.cancelKey, nil) {
-				if debugRoundTrip {
-					//req.logf("closech recv: %T %#v", pc.closed, pc.closed)
-				}
 				return nil, pc.mapRoundTripError(req, startBytesWritten, pc.closed)
 			}
 		//case <-respHeaderTimer:
 		case re := <-resc:
+			if debugSwitch {
+				println("roundTrip: resc")
+			}
 			if (re.res == nil) == (re.err == nil) {
-				println(1)
 				return nil, fmt.Errorf("internal error: exactly one of res or err should be set; nil=%v", re.res == nil)
 			}
-			if debugRoundTrip {
-				println(2)
-				//req.logf("resc recv: %p, %T/%#v", re.res, re.err, re.err)
-			}
 			if re.err != nil {
-				println(3)
 				return nil, pc.mapRoundTripError(req, startBytesWritten, re.err)
 			}
 			return re.res, nil
 		// TODO(spongehah) cancel(pc.roundTrip)
 		//case <-cancelChan:
-		case <-req.Request.timeoutch:
-			return nil, fmt.Errorf("request timeout\n")
+		//	canceled = pc.t.cancelRequest(req.cancelKey, errRequestCanceled)
+		//	cancelChan = nil
+		//case <-ctxDoneChan:
+		//	canceled = pc.t.cancelRequest(req.cancelKey, req.Context().Err())
+		//	cancelChan = nil
+		//	ctxDoneChan = nil
+		case <-timeoutch:
+			if debugSwitch {
+				println("roundTrip: timeoutch")
+			}
+			canceled = pc.t.cancelRequest(req.cancelKey, errors.New("timeout: req.Context().Err()"))
+			timeoutch = nil
+			return nil, errors.New("request timeout")
 		}
 	}
 }
 
+func asyncCb(async *libuv.Async) {
+	println("async called")
+}
+
 // readWriteLoop handles the main I/O loop for a persistent connection.
 // It processes incoming requests, sends them to the server, and handles responses.
-func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
-	// writeLoop related
-	defer close(pc.writeLoopDone)
-
-	// readLoop related
-	closeErr := errReadLoopExiting // default value, if not changed below
-	defer func() {
-		pc.close(closeErr)
-		// TODO(spongehah) ConnPool(readWriteLoop)
-		//pc.t.removeIdleConn(pc)
-	}()
-
-	//tryPutIdleConn := func(trace *httptrace.ClientTrace) bool {
-	//	if err := pc.t.tryPutIdleConn(pc); err != nil {
-	//		closeErr = err
-	//		if trace != nil && trace.PutIdleConn != nil && err != errKeepAlivesDisabled {
-	//			trace.PutIdleConn(err)
-	//		}
-	//		return false
-	//	}
-	//	if trace != nil && trace.PutIdleConn != nil {
-	//		trace.PutIdleConn(nil)
-	//	}
-	//	return true
-	//}
-
-	// eofc is used to block caller goroutines reading from Response.Body
-	// at EOF until this goroutines has (potentially) added the connection
-	// back to the idle pool.
-	eofc := make(chan struct{}, 1)
-	defer close(eofc) // unblock reader on errors
+func readWriteLoop(idle *libuv.Check) {
+	println("polling")
+	t := (*Transport)((*libuv.Handle)(c.Pointer(idle)).GetData())
 
 	// Read this once, before loop starts. (to avoid races in tests)
 	testHookMu.Lock()
@@ -938,281 +1039,334 @@ func (pc *persistConn) readWriteLoop(loop *libuv.Loop) {
 
 	const debugReadWriteLoop = true // Debug switch provided for developers
 
-	if debugReadWriteLoop {
-		println("readWriteLoop start")
-	}
-
 	// The polling state machine!
 	// Poll all ready tasks and act on them...
-	alive := true
-	var bodyWriter *io.PipeWriter
-	var rw readWaiter
-	for alive {
-		select {
-		case <-pc.closech:
-			if debugReadWriteLoop {
-				println("closech")
-			}
+	for {
+		task := t.exec.Poll()
+		if task == nil {
 			return
-		default:
-			task := pc.exec.Poll()
-			if task == nil {
-				loop.Run(libuv.RUN_ONCE)
+		}
+		taskData := (*taskData)(task.Userdata())
+		var taskId taskId
+		if taskData != nil {
+			taskId = taskData.taskId
+		} else {
+			taskId = notSet
+		}
+		if debugReadWriteLoop {
+			println("taskId: ", taskId)
+		}
+		switch taskId {
+		case write:
+			if debugReadWriteLoop {
+				println("write")
+			}
+
+			select {
+			case <-taskData.pc.closech:
+				task.Free()
+				continue
+			default:
+			}
+
+			err := checkTaskType(task, write)
+			client := (*hyper.ClientConn)(task.Value())
+			task.Free()
+
+			if err == nil {
+				// TODO(spongehah) Proxy(writeLoop)
+				err = taskData.req.Request.write(client, taskData, t.exec)
+			}
+			// For this request, no longer need the client
+			client.Free()
+			if bre, ok := err.(requestBodyReadError); ok {
+				err = bre.error
+				// Errors reading from the user's
+				// Request.Body are high priority.
+				// Set it here before sending on the
+				// channels below or calling
+				// pc.close() which tears down
+				// connections and causes other
+				// errors.
+				taskData.req.setError(err)
+			}
+			if err != nil {
+				//pc.writeErrCh <- err // to the body reader, which might recycle us
+				taskData.writeErrCh <- err // to the roundTrip function
+				taskData.pc.close(err)
 				continue
 			}
-			taskId := (taskId)(uintptr(task.Userdata()))
+
 			if debugReadWriteLoop {
-				println("taskId: ", taskId)
+				println("write end")
 			}
-			switch taskId {
-			case write:
-				if debugReadWriteLoop {
-					println("write")
-				}
-				wr := <-pc.writech // blocking
+		case read:
+			if debugReadWriteLoop {
+				println("read")
+			}
 
-				startBytesWritten := pc.conn.nwrite
-				err := checkTaskType(task, write)
-				client := (*hyper.ClientConn)(task.Value())
-				task.Free()
-				if err == nil {
-					// TODO(spongehah) Proxy(writeLoop)
-					err = wr.req.Request.write(pc.isProxy, wr.req.extra, client, pc.exec)
-				}
-				// For this request, no longer need the client
-				client.Free()
-				if bre, ok := err.(requestBodyReadError); ok {
-					err = bre.error
-					// Errors reading from the user's
-					// Request.Body are high priority.
-					// Set it here before sending on the
-					// channels below or calling
-					// pc.close() which tears down
-					// connections and causes other
-					// errors.
-					wr.req.setError(err)
-				}
-				if err != nil {
-					if pc.conn.nwrite == startBytesWritten {
-						err = nothingWrittenError{err}
-					}
-					//pc.writeErrCh <- err // to the body reader, which might recycle us
-					wr.ch <- err // to the roundTrip function
-					pc.close(err)
-					return
-				}
+			if taskData.pc.closeErr == nil {
+				taskData.pc.closeErr = errReadLoopExiting
+			}
+			// TODO(spongehah) ConnPool(readWriteLoop)
+			//if taskData.pc.tryPutIdleConn == nil {
+			//	//taskData.pc.tryPutIdleConn := func(trace *httptrace.ClientTrace) bool {
+			//	//	if err := pc.t.tryPutIdleConn(pc); err != nil {
+			//	//		closeErr = err
+			//	//		if trace != nil && trace.PutIdleConn != nil && err != errKeepAlivesDisabled {
+			//	//			trace.PutIdleConn(err)
+			//	//		}
+			//	//		return false
+			//	//	}
+			//	//	if trace != nil && trace.PutIdleConn != nil {
+			//	//		trace.PutIdleConn(nil)
+			//	//	}
+			//	//	return true
+			//	//}
+			//}
 
-				if debugReadWriteLoop {
-					println("write end")
-				}
-			case read:
-				if debugReadWriteLoop {
-					println("read")
-				}
+			err := checkTaskType(task, read)
 
-				err := checkTaskType(task, read)
+			taskData.pc.mu.Lock()
+			if taskData.pc.numExpectedResponses == 0 {
+				taskData.pc.closeLocked(errServerClosedIdle)
+				taskData.pc.mu.Unlock()
 
-				pc.mu.Lock()
-				if pc.numExpectedResponses == 0 {
-					pc.closeLocked(errServerClosedIdle)
-					pc.mu.Unlock()
-					return
-				}
-				pc.mu.Unlock()
+				// defer
+				taskData.pc.close(taskData.pc.closeErr)
+				// TODO(spongehah) ConnPool(readWriteLoop)
+				//t.removeIdleConn(pc)
+				continue
+			}
+			taskData.pc.mu.Unlock()
 
-				rc := <-pc.reqch // blocking
-				//trace := httptrace.ContextClientTrace(rc.req.Context())
+			//trace := httptrace.ContextClientTrace(rc.req.Context())
 
-				// Take the results
-				hyperResp := (*hyper.Response)(task.Value())
-				task.Free()
+			// Take the results
+			hyperResp := (*hyper.Response)(task.Value())
+			task.Free()
 
-				var resp *Response
-				var respBody *hyper.Body
-				if err == nil {
-					var pr *io.PipeReader
-					pr, bodyWriter = io.Pipe()
-					resp, err = ReadResponse(pr, rc.req, hyperResp)
-					respBody = hyperResp.Body()
-				} else {
-					err = transportReadFromServerError{err}
-					closeErr = err
-				}
+			var resp *Response
+			var respBody *hyper.Body
+			if err == nil {
+				var pr *io.PipeReader
+				pr, taskData.bodyWriter = io.Pipe()
+				resp, err = ReadResponse(pr, taskData.req.Request, hyperResp)
+				respBody = hyperResp.Body()
+			} else {
+				err = transportReadFromServerError{err}
+				taskData.pc.closeErr = err
+			}
 
-				// No longer need the response
-				hyperResp.Free()
+			// No longer need the response
+			hyperResp.Free()
 
-				if err != nil {
-					select {
-					case rc.ch <- responseAndError{err: err}:
-					case <-rc.callerGone:
-						return
-					}
-					return
-				}
-
-				// Response has been returned, stop the timer
-				if rc.req.timeout > 0 {
-					pc.conn.TimeoutTimer.Stop()
-					(*libuv.Handle)(c.Pointer(&pc.conn.TimeoutTimer)).Close(nil)
-				}
-
-				pc.mu.Lock()
-				pc.numExpectedResponses--
-				pc.mu.Unlock()
-
-				bodyWritable := resp.bodyIsWritable()
-				hasBody := rc.req.Method != "HEAD" && resp.ContentLength != 0
-
-				if resp.Close || rc.req.Close || resp.StatusCode <= 199 || bodyWritable {
-					// Don't do keep-alive on error if either party requested a close
-					// or we get an unexpected informational (1xx) response.
-					// StatusCode 100 is already handled above.
-					alive = false
-				}
-
-				if !hasBody || bodyWritable {
-					//replaced := pc.t.replaceReqCanceler(rc.cancelKey, nil)
-					pc.t.replaceReqCanceler(rc.cancelKey, nil)
-
+			if err != nil {
+				select {
+				case taskData.resc <- responseAndError{err: err}:
+				case <-taskData.callerGone:
+					// defer
+					taskData.pc.close(taskData.pc.closeErr)
 					// TODO(spongehah) ConnPool(readWriteLoop)
-					//// Put the idle conn back into the pool before we send the response
-					//// so if they process it quickly and make another request, they'll
-					//// get this same conn. But we use the unbuffered channel 'rc'
-					//// to guarantee that persistConn.roundTrip got out of its select
-					//// potentially waiting for this persistConn to close.
-					//alive = alive &&
-					//	!pc.sawEOF &&
-					//	pc.wroteRequest() &&
-					//	replaced && tryPutIdleConn(trace)
-
-					if bodyWritable {
-						closeErr = errCallerOwnsConn
-					}
-
-					select {
-					case rc.ch <- responseAndError{res: resp}:
-					case <-rc.callerGone:
-						return
-					}
-
-					// Now that they've read from the unbuffered channel, they're safely
-					// out of the select that also waits on this goroutine to die, so
-					// we're allowed to exit now if needed (if alive is false)
-					testHookReadLoopBeforeNextRead()
+					//t.removeIdleConn(pc)
 					continue
 				}
-
-				waitForBodyRead := make(chan bool, 2)
-				body := &bodyEOFSignal{
-					body: resp.Body,
-					earlyCloseFn: func() error {
-						waitForBodyRead <- false
-						<-eofc // will be closed by deferred call at the end of the function
-						return nil
-					},
-					fn: func(err error) error {
-						isEOF := err == io.EOF
-						waitForBodyRead <- isEOF
-						if isEOF {
-							<-eofc // see comment above eofc declaration
-						} else if err != nil {
-							if cerr := pc.canceled(); cerr != nil {
-								return cerr
-							}
-						}
-						return err
-					},
-				}
-				resp.Body = body
-
-				// TODO(spongehah) gzip(pc.readWriteLoop)
-				//if rc.addedGzip && EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
-				//	println("gzip reader")
-				//	resp.Body = &gzipReader{body: body}
-				//	resp.Header.Del("Content-Encoding")
-				//	resp.Header.Del("Content-Length")
-				//	resp.ContentLength = -1
-				//	resp.Uncompressed = true
-				//}
-
-				rw.waitForBodyRead = waitForBodyRead
-				rw.rc = rc
-				bodyForeachTask := respBody.Foreach(appendToResponseBody, c.Pointer(bodyWriter))
-				setTaskId(bodyForeachTask, readDone)
-				pc.exec.Push(bodyForeachTask)
-
-				// TODO(spongehah) select blocking(readWriteLoop)
-				//select {
-				//case rc.ch <- responseAndError{res: resp}:
-				//case <-rc.callerGone:
-				//	return
-				//}
-				rc.ch <- responseAndError{res: resp}
-
-				if debugReadWriteLoop {
-					println("read end")
-				}
-			case readDone:
-				// A background task of reading the response body is completed
-				if debugReadWriteLoop {
-					println("readDone")
-				}
-				if bodyWriter != nil {
-					bodyWriter.Close()
-				}
-				checkTaskType(task, readDone)
-
-				hyperBodyEOF := task.Type() == hyper.TaskEmpty
-				// free the task
-				task.Free()
-
-				// Before looping back to the top of this function and peeking on
-				// the bufio.Reader, wait for the caller goroutine to finish
-				// reading the response body. (or for cancellation or death)
-				select {
-				case bodyEOF := <-rw.waitForBodyRead:
-					bodyEOF = bodyEOF && hyperBodyEOF
-					//replaced := pc.t.replaceReqCanceler(rc.cancelKey, nil) // before pc might return to idle pool
-					pc.t.replaceReqCanceler(rw.rc.cancelKey, nil) // before pc might return to idle pool
-					// TODO(spongehah) ConnPool(readWriteLoop)
-					//alive = alive &&
-					//	bodyEOF &&
-					//	!pc.sawEOF &&
-					//	pc.wroteRequest() &&
-					//	replaced && tryPutIdleConn(trace)
-
-					eofc <- struct{}{}
-				// TODO(spongehah) cancel(pc.readWriteLoop)
-				//case <-rw.rc.req.Cancel:
-				//	alive = false
-				//	pc.t.CancelRequest(rw.rc.req)
-				//case <-rw.rc.req.Context().Done():
-				//	alive = false
-				//	pc.t.cancelRequest(rw.rc.cancelKey, rw.rc.req.Context().Err())
-				case <-pc.closech:
-					alive = false
-				}
-
-				testHookReadLoopBeforeNextRead()
-				if debugReadWriteLoop {
-					println("readDone end")
-				}
-			case notSet:
-				// A background task for hyper_client completed...
-				task.Free()
+				// defer
+				taskData.pc.close(taskData.pc.closeErr)
+				// TODO(spongehah) ConnPool(readWriteLoop)
+				//t.removeIdleConn(pc)
+				continue
 			}
+
+			taskData.pc.mu.Lock()
+			taskData.pc.numExpectedResponses--
+			taskData.pc.mu.Unlock()
+
+			bodyWritable := resp.bodyIsWritable()
+			hasBody := taskData.req.Method != "HEAD" && resp.ContentLength != 0
+
+			if resp.Close || taskData.req.Close || resp.StatusCode <= 199 || bodyWritable {
+				// Don't do keep-alive on error if either party requested a close
+				// or we get an unexpected informational (1xx) response.
+				// StatusCode 100 is already handled above.
+				taskData.pc.alive = false
+			}
+
+			if !hasBody || bodyWritable {
+				//replaced := pc.t.replaceReqCanceler(rc.cancelKey, nil)
+				t.replaceReqCanceler(taskData.req.cancelKey, nil)
+
+				// TODO(spongehah) ConnPool(readWriteLoop)
+				//// Put the idle conn back into the pool before we send the response
+				//// so if they process it quickly and make another request, they'll
+				//// get this same conn. But we use the unbuffered channel 'rc'
+				//// to guarantee that persistConn.roundTrip got out of its select
+				//// potentially waiting for this persistConn to close.
+				//taskData.pc.alive = taskData.pc.alive &&
+				//	!pc.sawEOF &&
+				//	pc.wroteRequest() &&
+				//	replaced && tryPutIdleConn(trace)
+
+				if bodyWritable {
+					taskData.pc.closeErr = errCallerOwnsConn
+				}
+
+				select {
+				case taskData.resc <- responseAndError{res: resp}:
+				case <-taskData.callerGone:
+					// defer
+					taskData.pc.close(taskData.pc.closeErr)
+					// TODO(spongehah) ConnPool(readWriteLoop)
+					//t.removeIdleConn(pc)
+					continue
+				}
+				// Now that they've read from the unbuffered channel, they're safely
+				// out of the select that also waits on this goroutine to die, so
+				// we're allowed to exit now if needed (if alive is false)
+				testHookReadLoopBeforeNextRead()
+				if taskData.pc.alive == false {
+					// defer
+					taskData.pc.close(taskData.pc.closeErr)
+					// TODO(spongehah) ConnPool(readWriteLoop)
+					//t.removeIdleConn(pc)
+				}
+				continue
+			}
+
+			body := &bodyEOFSignal{
+				body: resp.Body,
+				earlyCloseFn: func() error {
+					taskData.bodyWriter.Close()
+					return nil
+				},
+				fn: func(err error) error {
+					isEOF := err == io.EOF
+					if !isEOF {
+						if cerr := taskData.pc.canceled(); cerr != nil {
+							return cerr
+						}
+					}
+					return err
+				},
+			}
+			resp.Body = body
+
+			// TODO(spongehah) gzip(pc.readWriteLoop)
+			//if taskData.addedGzip && EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+			//	println("gzip reader")
+			//	resp.Body = &gzipReader{body: body}
+			//	resp.Header.Del("Content-Encoding")
+			//	resp.Header.Del("Content-Length")
+			//	resp.ContentLength = -1
+			//	resp.Uncompressed = true
+			//}
+
+			bodyForeachTask := respBody.Foreach(appendToResponseBody, c.Pointer(taskData.bodyWriter))
+			taskData.taskId = readDone
+			bodyForeachTask.SetUserdata(c.Pointer(taskData))
+			t.exec.Push(bodyForeachTask)
+			(*timeoutData)((*libuv.Handle)(c.Pointer(taskData.req.timer)).GetData()).taskData = taskData
+
+			// TODO(spongehah) select blocking(readWriteLoop)
+			//select {
+			//case taskData.resc <- responseAndError{res: resp}:
+			//case <-taskData.callerGone:
+			//	// defer
+			//	taskData.pc.close(taskData.pc.closeErr)
+			//	// TODO(spongehah) ConnPool(readWriteLoop)
+			//	//t.removeIdleConn(pc)
+			//	continue
+			//}
+			select {
+			case <-taskData.callerGone:
+				// defer
+				taskData.pc.close(taskData.pc.closeErr)
+				// TODO(spongehah) ConnPool(readWriteLoop)
+				//t.removeIdleConn(pc)
+				continue
+			default:
+			}
+			taskData.resc <- responseAndError{res: resp}
+
+			if debugReadWriteLoop {
+				println("read end")
+			}
+		case readDone:
+			// A background task of reading the response body is completed
+			if debugReadWriteLoop {
+				println("readDone")
+			}
+			if taskData.bodyWriter != nil {
+				taskData.bodyWriter.Close()
+			}
+			checkTaskType(task, readDone)
+
+			//bodyEOF := task.Type() == hyper.TaskEmpty
+			// free the task
+			task.Free()
+
+			t.replaceReqCanceler(taskData.req.cancelKey, nil) // before pc might return to idle pool
+			// TODO(spongehah) ConnPool(readWriteLoop)
+			//taskData.pc.alive = taskData.pc.alive &&
+			//	bodyEOF &&
+			//	!pc.sawEOF &&
+			//	pc.wroteRequest() &&
+			//	replaced && tryPutIdleConn(trace)
+
+			// TODO(spongehah) cancel(pc.readWriteLoop)
+			//case <-rw.rc.req.Cancel:
+			//	taskData.pc.alive = false
+			//	pc.t.CancelRequest(rw.rc.req)
+			//case <-rw.rc.req.Context().Done():
+			//	taskData.pc.alive = false
+			//	pc.t.cancelRequest(rw.rc.cancelKey, rw.rc.req.Context().Err())
+			//case <-taskData.pc.closech:
+			//	taskData.pc.alive = false
+			//}
+
+			select {
+			case <-taskData.req.timeoutch:
+				continue
+			case <-taskData.pc.closech:
+				taskData.pc.alive = false
+			default:
+			}
+
+			if taskData.pc.alive == false {
+				// defer
+				taskData.pc.close(taskData.pc.closeErr)
+				// TODO(spongehah) ConnPool(readWriteLoop)
+				//t.removeIdleConn(pc)
+			}
+
+			testHookReadLoopBeforeNextRead()
+			if debugReadWriteLoop {
+				println("readDone end")
+			}
+		case notSet:
+			// A background task for hyper_client completed...
+			task.Free()
 		}
 	}
 }
 
 // ----------------------------------------------------------
 
+type taskData struct {
+	taskId     taskId
+	bodyWriter *io.PipeWriter
+	req        *transportRequest
+	pc         *persistConn
+	addedGzip  bool
+	writeErrCh chan error
+	callerGone chan struct{}
+	resc       chan responseAndError
+}
+
 type connData struct {
 	TcpHandle     libuv.Tcp
 	ConnectReq    libuv.Connect
 	ReadBuf       libuv.Buf
-	TimeoutTimer  libuv.Timer
 	ReadBufFilled uintptr
 	nwrite        int64 // bytes written(Replaced from persistConn's nwrite)
 	ReadWaker     *hyper.Waker
@@ -1238,8 +1392,10 @@ func (conn *connData) Close() error {
 
 // onConnect is the libuv callback for a successful connection
 func onConnect(req *libuv.Connect, status c.Int) {
-	//conn := (*ConnData)(req.Data)
-	//conn := (*struct{ data *ConnData })(c.Pointer(req)).data
+	if debugSwitch {
+		println("connect start")
+		defer println("connect end")
+	}
 	conn := (*connData)((*libuv.Req)(c.Pointer(req)).GetData())
 
 	if status < 0 {
@@ -1364,11 +1520,25 @@ func writeCallBack(userdata c.Pointer, ctx *hyper.Context, buf *uint8, bufLen ui
 }
 
 // onTimeout is the libuv callback for a timeout
-func onTimeout(handle *libuv.Timer) {
-	ct := (*connAndTimeoutChan)((*libuv.Handle)(c.Pointer(handle)).GetData())
-	close(ct.timeoutch)
-	// Close the timer
-	(*libuv.Handle)(c.Pointer(&ct.conn.TimeoutTimer)).Close(nil)
+func onTimeout(timer *libuv.Timer) {
+	if debugSwitch {
+		println("onTimeout start")
+		defer println("onTimeout end")
+	}
+	data := (*timeoutData)((*libuv.Handle)(c.Pointer(timer)).GetData())
+	close(data.timeoutch)
+	timer.Stop()
+
+	taskData := data.taskData
+	if taskData != nil {
+		pc := taskData.pc
+		pc.alive = false
+		pc.t.cancelRequest(taskData.req.cancelKey, errors.New("timeout: req.Context().Err()"))
+		// defer
+		pc.close(pc.closeErr)
+		// TODO(spongehah) ConnPool(onTimeout)
+		//t.removeIdleConn(pc)
+	}
 }
 
 // newIoWithConnReadWrite creates a new IO with read and write callbacks
@@ -1389,17 +1559,6 @@ const (
 	read
 	readDone
 )
-
-type readWaiter struct {
-	rc              requestAndChan
-	waitForBodyRead chan bool
-}
-
-// setTaskId Set taskId to the task's userdata as a unique identifier
-func setTaskId(task *hyper.Task, userData taskId) {
-	var data = userData
-	task.SetUserdata(unsafe.Pointer(uintptr(data)))
-}
 
 // checkTaskType checks the task type
 func checkTaskType(task *hyper.Task, curTaskId taskId) error {
@@ -1455,14 +1614,15 @@ func fail(err *hyper.Error) error {
 
 // error values for debugging and testing, not seen by users.
 var (
-	errKeepAlivesDisabled = errors.New("http: putIdleConn: keep alives disabled")
-	errConnBroken         = errors.New("http: putIdleConn: connection is in bad state")
-	errCloseIdle          = errors.New("http: putIdleConn: CloseIdleConnections was called")
-	errTooManyIdle        = errors.New("http: putIdleConn: too many idle connections")
-	errTooManyIdleHost    = errors.New("http: putIdleConn: too many idle connections for host")
-	errCloseIdleConns     = errors.New("http: CloseIdleConnections called")
-	errReadLoopExiting    = errors.New("http: persistConn.readLoop exiting")
-	errIdleConnTimeout    = errors.New("http: idle connection timeout")
+	errKeepAlivesDisabled   = errors.New("http: putIdleConn: keep alives disabled")
+	errConnBroken           = errors.New("http: putIdleConn: connection is in bad state")
+	errCloseIdle            = errors.New("http: putIdleConn: CloseIdleConnections was called")
+	errTooManyIdle          = errors.New("http: putIdleConn: too many idle connections")
+	errTooManyIdleHost      = errors.New("http: putIdleConn: too many idle connections for host")
+	errCloseIdleConns       = errors.New("http: CloseIdleConnections called")
+	errReadLoopExiting      = errors.New("http: Transport.readWriteLoop.read exiting")
+	errReadWriteLoopExiting = errors.New("http: Transport.readWriteLoop exiting")
+	errIdleConnTimeout      = errors.New("http: idle connection timeout")
 
 	// errServerClosedIdle is not seen by users for idempotent requests, but may be
 	// seen by a user if the server shuts down an idle connection and sends its FIN
@@ -1581,9 +1741,7 @@ type persistConn struct {
 	conn     *connData
 	//tlsState *tls.ConnectionState
 	//nwrite        int64       // bytes written(Replaced by connData.nwrite)
-	reqch   chan requestAndChan // written by roundTrip; read by readWriteLoop
-	writech chan writeRequest   // written by roundTrip; read by readWriteLoop
-	closech chan struct{}       // closed when conn closed
+	closech chan struct{} // closed when conn closed
 	isProxy bool
 
 	writeLoopDone chan struct{} // closed when readWriteLoop ends
@@ -1598,8 +1756,9 @@ type persistConn struct {
 	// original Request given to RoundTrip is not modified)
 	mutateHeaderFunc func(Header)
 
-	// hyper specific
-	exec *hyper.Executor
+	// other
+	alive    bool  // Replace the alive in readLoop
+	closeErr error // Replace the closeErr in readLoop
 }
 
 func (pc *persistConn) cancelRequest(err error) {
@@ -1635,13 +1794,10 @@ func (pc *persistConn) closeLocked(err error) {
 				pc.conn.Close()
 			}
 			close(pc.closech)
+			close(pc.writeLoopDone)
 		}
 	}
 	pc.mutateHeaderFunc = nil
-	// hyper related
-	if pc.exec != nil {
-		pc.exec.Free()
-	}
 }
 
 // mapRoundTripError returns the appropriate error value for
@@ -1742,8 +1898,7 @@ type connectMethod struct {
 	// then targetAddr is not included in the connect method key, because the socket can
 	// be reused for different targetAddr values.
 	targetAddr string
-	treq       *transportRequest // optional
-	onlyH1     bool              // whether to disable HTTP/2 and force HTTP/1
+	onlyH1     bool // whether to disable HTTP/2 and force HTTP/1
 }
 
 // connectMethodKey is the map key version of connectMethod, with a
@@ -1808,10 +1963,11 @@ func (cm *connectMethod) proxyAuth() string {
 // These three options are racing against each other and use
 // wantConn to coordinate and agree about the winning outcome.
 type wantConn struct {
-	cm    connectMethod
-	key   connectMethodKey // cm.key()
-	ctx   context.Context  // context for dial
-	ready chan struct{}    // closed when pc, err pair is delivered
+	cm        connectMethod
+	key       connectMethodKey // cm.key()
+	ctx       context.Context  // context for dial
+	timeoutch chan struct{}    // tmp timeout to replace ctx
+	ready     chan struct{}    // closed when pc, err pair is delivered
 
 	// hooks for testing to know when dials are done
 	// beforeDial is called in the getConn goroutine when the dial is queued.
@@ -1865,6 +2021,11 @@ func (w *wantConn) tryDeliver(pc *persistConn, err error) bool {
 	w.err = err
 	if w.pc == nil && w.err == nil {
 		panic("net/http: internal error: misuse of tryDeliver")
+	}
+	select {
+	case <-w.timeoutch:
+		pc.close(errors.New("request timeout: dialConn timeout"))
+	default:
 	}
 	close(w.ready)
 	return true

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goplus/llgo/c/libuv"
 	"golang.org/x/net/idna"
 
 	"github.com/goplus/llgo/c"
@@ -37,12 +38,14 @@ type Request struct {
 	RemoteAddr string
 	RequestURI string
 	//TLS              *tls.ConnectionState
-	Cancel    <-chan struct{}
-	timeoutch chan struct{} //optional
+	Cancel <-chan struct{}
 
 	Response *Response
-	timeout  time.Duration
 	ctx      context.Context
+
+	deadline  time.Time
+	timeoutch chan struct{} //tmp timeout
+	timer     *libuv.Timer
 }
 
 const defaultChunkSize = 8192
@@ -117,6 +120,7 @@ func NewRequestWithContext(ctx context.Context, method, urlStr string, body io.R
 		Header:     make(Header),
 		Body:       rc,
 		Host:       u.Host,
+		timer:      nil,
 	}
 	if body != nil {
 		switch v := body.(type) {
@@ -258,7 +262,7 @@ var reqWriteExcludeHeader = map[string]bool{
 // extraHeaders may be nil
 // waitForContinue may be nil
 // always closes body
-func (r *Request) write(usingProxy bool, extraHeader Header, client *hyper.ClientConn, exec *hyper.Executor) (err error) {
+func (r *Request) write(client *hyper.ClientConn, taskData *taskData, exec *hyper.Executor) (err error) {
 	//trace := httptrace.ContextClientTrace(r.Context())
 	//if trace != nil && trace.WroteRequest != nil {
 	//	defer func() {
@@ -269,13 +273,14 @@ func (r *Request) write(usingProxy bool, extraHeader Header, client *hyper.Clien
 	//}
 
 	// Prepare the hyper.Request
-	hyperReq, err := r.newHyperRequest(usingProxy, extraHeader)
+	hyperReq, err := r.newHyperRequest(taskData.pc.isProxy, taskData.req.extra)
 	if err != nil {
 		return err
 	}
 	// Send it!
 	sendTask := client.Send(hyperReq)
-	setTaskId(sendTask, read)
+	taskData.taskId = read
+	sendTask.SetUserdata(c.Pointer(taskData))
 	sendRes := exec.Push(sendTask)
 	if sendRes != hyper.OK {
 		err = errors.New("failed to send the request")
