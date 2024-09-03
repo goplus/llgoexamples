@@ -29,6 +29,36 @@ type Request struct {
 }
 
 func newRequest(ListenAddr string, conn *conn, hyperReq *hyper.Request) (*Request, error) {
+	req := Request{
+		Header:     make(Header),
+		timeout:    0,
+	}
+
+	headers := hyperReq.Headers()
+	if headers != nil {
+		headers.Foreach(addHeader, unsafe.Pointer(&req))
+	} else {
+		return nil, fmt.Errorf("failed to get request headers")
+	}
+
+	fmt.Printf("Headers:\n")
+	for key, values := range req.Header {
+		for _, value := range values {
+			fmt.Printf("%s: %s\n", key, value)
+		}
+	}
+
+	var host string
+	for key, values := range req.Header {
+		if strings.EqualFold(key, "Host") {
+			if len(values) > 0 {
+				host = values[0]
+				break
+			}
+		}
+
+	}
+
 	method := make([]byte, 32)
 	methodLen := unsafe.Sizeof(method)
 	if err := hyperReq.Method(&method[0], &methodLen); err != hyper.OK {
@@ -53,7 +83,7 @@ func newRequest(ListenAddr string, conn *conn, hyperReq *hyper.Request) (*Reques
 	}
 
 	if authorityLen == 0 {
-		authorityStr = ListenAddr
+		authorityStr = host
 	} else {
 		authorityStr = string(authority[:authorityLen])
 	}
@@ -63,7 +93,8 @@ func newRequest(ListenAddr string, conn *conn, hyperReq *hyper.Request) (*Reques
 	} else {
 		pathAndQueryStr = string(pathAndQuery[:pathAndQueryLen])
 	}
-
+	req.Host = authorityStr
+	req.Method = methodStr
 
 	var proto string
 	var protoMajor, protoMinor int
@@ -89,43 +120,28 @@ func newRequest(ListenAddr string, conn *conn, hyperReq *hyper.Request) (*Reques
 	default:
 		return nil, fmt.Errorf("unknown HTTP version: %d", version)
 	}
+	req.Proto = proto
+	req.ProtoMajor = protoMajor
+	req.ProtoMinor = protoMinor	
 
-	urlStr := fmt.Sprintf("%s://%s%s", schemeStr, authorityStr, pathAndQueryStr)
+	urlStr := fmt.Sprintf("%s://%s%s", schemeStr, host, pathAndQueryStr)
 	fmt.Printf("URL: %s\n", urlStr)
 	url, err := url.Parse(urlStr)
 	if err != nil {
 		return nil, err
 	}
-
-	req := Request{
-		Method:     methodStr,
-		URL:        url,
-		Proto:      proto,
-		ProtoMajor: protoMajor,
-		ProtoMinor: protoMinor,
-		Header:     make(Header),
-		Host:       authorityStr,
-		timeout:    0,
-	}
-
-	headers := hyperReq.Headers()
-	if headers != nil {
-		headers.Foreach(addHeader, unsafe.Pointer(&req))
-	} else {
-		return nil, fmt.Errorf("failed to get request headers")
-	}
+	req.URL = url
 
 	if methodStr == "POST" || methodStr == "PUT" || methodStr == "PATCH" {
 		body := hyperReq.Body()
 		if body != nil {
-			bodyWriter := new(io.PipeWriter)
+			var bodyWriter *io.PipeWriter
 			req.Body, bodyWriter = io.Pipe()
-
-
-			task := body.Foreach(getBodyChunk, c.Pointer(&bodyWriter), freeBodyWriter)
+			task := body.Foreach(getBodyChunk, c.Pointer(&bodyWriter), nil)
 			if task != nil {
 				r := conn.Executor.Push(task)
 				if r != hyper.OK {
+					fmt.Printf("failed to push body foreach task: %d\n", r)
 					task.Free()
 					return nil, fmt.Errorf("failed to push body foreach task: %v", r)
 				}
@@ -164,9 +180,4 @@ func getBodyChunk(userdata c.Pointer, chunk *hyper.Buf) c.Int {
 	writer.Write(unsafe.Slice(buf, len))
 
 	return hyper.IterContinue
-}
-
-func freeBodyWriter(userdata c.Pointer) {
-	writer := (*io.PipeWriter)(userdata)
-	writer.Close()
 }
