@@ -26,7 +26,6 @@ type body struct {
 
 var DefaultChunkSize uintptr = 8192
 
-
 func newResponse(channel *hyper.ResponseChannel) *response {
 	fmt.Printf("newResponse called\n")
 	resp := response{
@@ -77,6 +76,15 @@ func (r *response) WriteHeader(statusCode int) {
 			return
 		}
 	}
+
+	//debug
+	fmt.Printf("< HTTP/1.1 %d\n", statusCode)
+	for key, values := range r.header {
+		for _, value := range values {
+			fmt.Printf("< %s: %s\n", key, value)
+		}
+	}
+
 	r.resp = newResp
 }
 
@@ -87,8 +95,8 @@ func (r *response) finalize() error {
 	}
 
 	bodyData := body{
-		data: r.body,
-		len: uintptr(len(r.body)),
+		data:    r.body,
+		len:     uintptr(len(r.body)),
 		readLen: 0,
 	}
 	fmt.Printf("bodyData constructed\n")
@@ -117,7 +125,12 @@ func (r *response) finalize() error {
 func setBodyDataFunc(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
 	fmt.Printf("setBodyDataFunc called\n")
 	body := (*body)(userdata)
+
 	if body.len > 0 {
+		//debug
+		fmt.Println("<")
+		fmt.Printf("%s", string(body.data))
+
 		if body.len > DefaultChunkSize {
 			*chunk = hyper.CopyBuf(&body.data[body.readLen], DefaultChunkSize)
 			body.readLen += DefaultChunkSize

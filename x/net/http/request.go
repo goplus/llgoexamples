@@ -3,6 +3,8 @@ package http
 import (
 	"fmt"
 	"io"
+
+	//"mime/multipart"
 	"net/url"
 	"strings"
 	"time"
@@ -25,27 +27,28 @@ type Request struct {
 	TransferEncoding []string
 	Close            bool
 	Host             string
-	timeout          time.Duration
+	// Form             url.Values
+	// PostForm         url.Values
+	// MultipartForm    *multipart.Form
+	RemoteAddr string
+	RequestURI string
+	timeout    time.Duration
 }
 
-func newRequest(ListenAddr string, conn *conn, hyperReq *hyper.Request) (*Request, error) {
+func (conn *conn) readRequest(hyperReq *hyper.Request) (*Request, error) {
+	println("readRequest called")
 	req := Request{
-		Header:     make(Header),
-		timeout:    0,
+		Header:  make(Header),
+		timeout: 0,
+		Body:    nil,
 	}
+	req.RemoteAddr = conn.remoteAddr
 
 	headers := hyperReq.Headers()
 	if headers != nil {
 		headers.Foreach(addHeader, unsafe.Pointer(&req))
 	} else {
 		return nil, fmt.Errorf("failed to get request headers")
-	}
-
-	fmt.Printf("Headers:\n")
-	for key, values := range req.Header {
-		for _, value := range values {
-			fmt.Printf("%s: %s\n", key, value)
-		}
 	}
 
 	var host string
@@ -66,11 +69,10 @@ func newRequest(ListenAddr string, conn *conn, hyperReq *hyper.Request) (*Reques
 	}
 
 	methodStr := string(method[:methodLen])
-	fmt.Printf("Method: %s\n", methodStr)
 
 	var scheme, authority, pathAndQuery [1024]byte
 	schemeLen, authorityLen, pathAndQueryLen := unsafe.Sizeof(scheme), unsafe.Sizeof(authority), unsafe.Sizeof(pathAndQuery)
-	uriResult := hyperReq.URIParts(&scheme[0], &schemeLen, &authority[0], &authorityLen, &pathAndQuery[0], &pathAndQueryLen);
+	uriResult := hyperReq.URIParts(&scheme[0], &schemeLen, &authority[0], &authorityLen, &pathAndQuery[0], &pathAndQueryLen)
 	if uriResult != hyper.OK {
 		return nil, fmt.Errorf("failed to get URI parts: %v", uriResult)
 	}
@@ -95,11 +97,11 @@ func newRequest(ListenAddr string, conn *conn, hyperReq *hyper.Request) (*Reques
 	}
 	req.Host = authorityStr
 	req.Method = methodStr
+	req.RequestURI = pathAndQueryStr
 
 	var proto string
 	var protoMajor, protoMinor int
 	version := hyperReq.Version()
-	fmt.Printf("Version: %d\n", version)
 	switch version {
 	case hyper.HTTPVersion10:
 		proto = "HTTP/1.0"
@@ -122,37 +124,35 @@ func newRequest(ListenAddr string, conn *conn, hyperReq *hyper.Request) (*Reques
 	}
 	req.Proto = proto
 	req.ProtoMajor = protoMajor
-	req.ProtoMinor = protoMinor	
+	req.ProtoMinor = protoMinor
 
-	urlStr := fmt.Sprintf("%s://%s%s", schemeStr, host, pathAndQueryStr)
-	fmt.Printf("URL: %s\n", urlStr)
+	urlStr := fmt.Sprintf("%s://%s%s", schemeStr, authorityStr, pathAndQueryStr)
 	url, err := url.Parse(urlStr)
 	if err != nil {
 		return nil, err
 	}
 	req.URL = url
 
-	if methodStr == "POST" || methodStr == "PUT" || methodStr == "PATCH" {
-		body := hyperReq.Body()
-		if body != nil {
-			var bodyWriter *io.PipeWriter
-			req.Body, bodyWriter = io.Pipe()
-			task := body.Foreach(getBodyChunk, c.Pointer(&bodyWriter), nil)
-			if task != nil {
-				r := conn.Executor.Push(task)
-				if r != hyper.OK {
-					fmt.Printf("failed to push body foreach task: %d\n", r)
-					task.Free()
-					return nil, fmt.Errorf("failed to push body foreach task: %v", r)
-				}
-			} else {
-				return nil, fmt.Errorf("failed to create body foreach task")
+	body := hyperReq.Body()
+	if body != nil {
+		req.Body, conn.bodyWriter = io.Pipe()
+		task := body.Foreach(getBodyChunk, c.Pointer(conn.bodyWriter), nil)
+		if task != nil {
+			r := conn.executor.Push(task)
+			if r != hyper.OK {
+				fmt.Printf("failed to push body foreach task: %d\n", r)
+				task.Free()
+				return nil, fmt.Errorf("failed to push body foreach task: %v", r)
 			}
-
 		} else {
-			return nil, fmt.Errorf("failed to get request body")
+			return nil, fmt.Errorf("failed to create body foreach task")
 		}
+
+	} else {
+		return nil, fmt.Errorf("failed to get request body")
 	}
+
+	defer hyperReq.Free()
 
 	return &req, nil
 }
@@ -177,7 +177,18 @@ func getBodyChunk(userdata c.Pointer, chunk *hyper.Buf) c.Int {
 	writer := (*io.PipeWriter)(userdata)
 	buf := chunk.Bytes()
 	len := chunk.Len()
-	writer.Write(unsafe.Slice(buf, len))
+	bytes := unsafe.Slice(buf, len)
+	//debug
+	fmt.Printf("Writing %d bytes to response body\n", len)
+	fmt.Printf("Body chunk: %s\n", string(bytes))
+
+	_, err := writer.Write(bytes)
+	fmt.Printf("Body chunk written\n")
+	if err != nil {
+		fmt.Println("Error writing to response body:", err)
+		writer.Close()
+		return hyper.IterBreak
+	}
 
 	return hyper.IterContinue
 }

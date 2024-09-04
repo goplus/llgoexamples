@@ -3,6 +3,7 @@ package http
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"sync"
@@ -32,34 +33,36 @@ type Server struct {
 	Addr    string
 	Handler Handler
 
-	uvLoop        *libuv.Loop
-	uvServer      libuv.Tcp
-	inShutdown    atomic.Bool
-	http1Opts     *hyper.Http1ServerconnOptions
-	http2Opts     *hyper.Http2ServerconnOptions
-	checkHandle   libuv.Check
+	uvLoop      *libuv.Loop
+	uvServer    libuv.Tcp
+	inShutdown  atomic.Bool
+	http1Opts   *hyper.Http1ServerconnOptions
+	http2Opts   *hyper.Http2ServerconnOptions
+	checkHandle libuv.Check
+	idleHandle  libuv.Idle
 
 	mu                sync.Mutex
 	activeConnections map[*conn]struct{}
 }
 
 type conn struct {
-	Stream        libuv.Tcp
-	PollHandle    libuv.Poll
-	EventMask     c.Uint
-	ReadWaker     *hyper.Waker
-	WriteWaker    *hyper.Waker
-	IsClosing     atomic.Bool
-	ClosedHandles int32
-	Executor      *hyper.Executor
+	stream        libuv.Tcp
+	pollHandle    libuv.Poll
+	eventMask     c.Uint
+	readWaker     *hyper.Waker
+	writeWaker    *hyper.Waker
+	isClosing     atomic.Bool
+	closedHandles int32
+	executor      *hyper.Executor
+	remoteAddr    string
+	bodyWriter    *io.PipeWriter
 }
 
 type serviceUserdata struct {
-	Host       [128]c.Char
-	Port       [8]c.Char
-	Conn       *conn
-	Server     *Server
-	ListenAddr string
+	host   [128]c.Char
+	port   [8]c.Char
+	conn   *conn
+	server *Server
 }
 
 func NewServer(addr string) *Server {
@@ -134,6 +137,18 @@ func (srv *Server) ListenAndServe() error {
 		os.Exit(1)
 	}
 
+	// if r := libuv.InitIdle(srv.uvLoop, &srv.idleHandle); r != 0 {
+	// 	fmt.Fprintf(os.Stderr, "Failed to initialize idle handler: %d\n", r)
+	// 	os.Exit(1)
+	// }
+
+	// (*libuv.Handle)(unsafe.Pointer(&srv.idleHandle)).SetData(unsafe.Pointer(srv))
+
+	// if r := srv.idleHandle.Start(onIdle); r != 0 {
+	// 	fmt.Fprintf(os.Stderr, "Failed to start idle handler: %d\n", r)
+	// 	os.Exit(1)
+	// }
+
 	fmt.Printf("Listening on %s\n", srv.Addr)
 
 	for {
@@ -173,70 +188,70 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 		return
 	}
 
-	libuv.InitTcp(srv.uvLoop, &conn.Stream)
-	conn.Stream.Data = unsafe.Pointer(conn)
+	libuv.InitTcp(srv.uvLoop, &conn.stream)
+	conn.stream.Data = unsafe.Pointer(conn)
 
-	if serverStream.Accept((*libuv.Stream)(unsafe.Pointer(&conn.Stream))) == 0 {
+	if serverStream.Accept((*libuv.Stream)(unsafe.Pointer(&conn.stream))) == 0 {
 		fmt.Println("Accepted new connection")
-		r := libuv.PollInit(srv.uvLoop, &conn.PollHandle, libuv.OsFd(conn.Stream.GetIoWatcherFd()))
+		r := libuv.PollInit(srv.uvLoop, &conn.pollHandle, libuv.OsFd(conn.stream.GetIoWatcherFd()))
 		if r < 0 {
 			fmt.Fprintf(os.Stderr, "uv_poll_init error: %s\n", libuv.Strerror(libuv.Errno(r)))
-			(*libuv.Handle)(unsafe.Pointer(&conn.Stream)).Close(nil)
+			(*libuv.Handle)(unsafe.Pointer(&conn.stream)).Close(nil)
 			return
 		}
-	
-		(*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).Data = unsafe.Pointer(conn)
-	
+
+		(*libuv.Handle)(unsafe.Pointer(&conn.pollHandle)).Data = unsafe.Pointer(conn)
+
 		if !updateConnRegistrations(conn, true) {
-			(*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).Close(nil)
-			(*libuv.Handle)(unsafe.Pointer(&conn.Stream)).Close(nil)
+			(*libuv.Handle)(unsafe.Pointer(&conn.pollHandle)).Close(nil)
+			(*libuv.Handle)(unsafe.Pointer(&conn.stream)).Close(nil)
 			return
 		}
 
 		userdata := createServiceUserdata()
-		userdata.Server = srv
+		userdata.server = srv
 		if userdata == nil {
 			fmt.Fprintf(os.Stderr, "Failed to create service userdata\n")
-			(*libuv.Handle)(unsafe.Pointer(&conn.Stream)).Close(nil)
+			(*libuv.Handle)(unsafe.Pointer(&conn.stream)).Close(nil)
 			return
 		}
-		fmt.Printf("ListenAddr: %s\n", srv.Addr)
-		userdata.ListenAddr = srv.Addr
 
 		var addr cnet.SockaddrStorage
 		addrlen := c.Int(unsafe.Sizeof(addr))
-		conn.Stream.Getpeername((*cnet.SockAddr)(c.Pointer(&addr)), &addrlen)
+		conn.stream.Getpeername((*cnet.SockAddr)(c.Pointer(&addr)), &addrlen)
 
 		if addr.Family == cnet.AF_INET {
 			s := (*cnet.SockaddrIn)(unsafe.Pointer(&addr))
-			libuv.Ip4Name(s, (*c.Char)(&userdata.Host[0]), unsafe.Sizeof(userdata.Host))
-			c.Snprintf((*c.Char)(&userdata.Port[0]), unsafe.Sizeof(userdata.Port), c.Str("%d"), cnet.Ntohs(s.Port))
+			libuv.Ip4Name(s, (*c.Char)(&userdata.host[0]), unsafe.Sizeof(userdata.host))
+			c.Snprintf((*c.Char)(&userdata.port[0]), unsafe.Sizeof(userdata.port), c.Str("%d"), cnet.Ntohs(s.Port))
 		} else if addr.Family == cnet.AF_INET6 {
 			s := (*cnet.SockaddrIn6)(unsafe.Pointer(&addr))
-			libuv.Ip6Name(s, (*c.Char)(&userdata.Host[0]), unsafe.Sizeof(userdata.Host))
-			c.Snprintf((*c.Char)(&userdata.Port[0]), unsafe.Sizeof(userdata.Port), c.Str("%d"), cnet.Ntohs(s.Port))
+			libuv.Ip6Name(s, (*c.Char)(&userdata.host[0]), unsafe.Sizeof(userdata.host))
+			c.Snprintf((*c.Char)(&userdata.port[0]), unsafe.Sizeof(userdata.port), c.Str("%d"), cnet.Ntohs(s.Port))
 		}
+
+		conn.remoteAddr = c.GoString((*c.Char)(&userdata.host[0])) + ":" + c.GoString((*c.Char)(&userdata.port[0]))
 
 		executor := hyper.NewExecutor()
 		if executor == nil {
 			fmt.Fprintf(os.Stderr, "Failed to create Executor\n")
-			(*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).Close(nil)
-			(*libuv.Handle)(unsafe.Pointer(&conn.Stream)).Close(nil)
+			(*libuv.Handle)(unsafe.Pointer(&conn.pollHandle)).Close(nil)
+			(*libuv.Handle)(unsafe.Pointer(&conn.stream)).Close(nil)
 			return
 		}
-		conn.Executor = executor
+		conn.executor = executor
 
 		fmt.Println("Conn created")
 		srv.trackConn(conn, true)
 		fmt.Println("Conn tracked")
 
-		userdata.Conn = conn
+		userdata.conn = conn
 
 		io := createIo(conn)
 		service := hyper.ServiceNew(serverCallback)
 		service.SetUserdata(unsafe.Pointer(userdata), nil)
 
-		http1Opts := hyper.Http1ServerconnOptionsNew(conn.Executor)
+		http1Opts := hyper.Http1ServerconnOptionsNew(conn.executor)
 		if http1Opts == nil {
 			fmt.Fprintf(os.Stderr, "Failed to create http1_opts\n")
 			os.Exit(1)
@@ -247,8 +262,8 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 			os.Exit(1)
 		}
 		srv.http1Opts = http1Opts
-	
-		http2Opts := hyper.Http2ServerconnOptionsNew(conn.Executor)
+
+		http2Opts := hyper.Http2ServerconnOptionsNew(conn.executor)
 		if http2Opts == nil {
 			fmt.Fprintf(os.Stderr, "Failed to create http2_opts\n")
 			os.Exit(1)
@@ -266,30 +281,50 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 		srv.http2Opts = http2Opts
 
 		serverconn := hyper.ServeHttpXConnection(http1Opts, http2Opts, io, service)
-		conn.Executor.Push(serverconn)
+		conn.executor.Push(serverconn)
 	} else {
 		fmt.Println("Client not accepted")
-		(*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).Close(nil)
-		(*libuv.Handle)(unsafe.Pointer(&conn.Stream)).Close(nil)
+		(*libuv.Handle)(unsafe.Pointer(&conn.pollHandle)).Close(nil)
+		(*libuv.Handle)(unsafe.Pointer(&conn.stream)).Close(nil)
 	}
 }
 
 func onCheck(handle *libuv.Check) {
+	//fmt.Println("onCheck called")
 	srv := (*Server)((*libuv.Handle)(unsafe.Pointer(handle)).GetData())
 	for conn := range srv.activeConnections {
-		if conn.Executor != nil {
-			task := conn.Executor.Poll()
+		if conn.executor != nil {
+			task := conn.executor.Poll()
 			for task != nil {
 				srv.handleTask(task)
-				task = conn.Executor.Poll()
+				task = conn.executor.Poll()
 			}
 		}
 	}
 
-    if srv.shuttingDown() {
-        fmt.Println("Shutdown initiated, cleaning up...")
-        handle.Stop()
-    }
+	if srv.shuttingDown() {
+		fmt.Println("Shutdown initiated, cleaning up...")
+		handle.Stop()
+	}
+}
+
+func onIdle(handle *libuv.Idle) {
+	//fmt.Println("onIdle called")
+	srv := (*Server)((*libuv.Handle)(unsafe.Pointer(handle)).GetData())
+	for conn := range srv.activeConnections {
+		if conn.executor != nil {
+			task := conn.executor.Poll()
+			for task != nil {
+				srv.handleTask(task)
+				task = conn.executor.Poll()
+			}
+		}
+	}
+
+	if srv.shuttingDown() {
+		fmt.Println("Shutdown initiated, cleaning up...")
+		handle.Stop()
+	}
 }
 
 func serverCallback(userdata unsafe.Pointer, hyperReq *hyper.Request, channel *hyper.ResponseChannel) {
@@ -300,7 +335,7 @@ func serverCallback(userdata unsafe.Pointer, hyperReq *hyper.Request, channel *h
 		return
 	}
 
-	req, err := newRequest(userData.ListenAddr, userData.Conn, hyperReq)
+	req, err := userData.conn.readRequest(hyperReq)
 	if err != nil {
 		fmt.Printf("Error creating request: %v\n", err)
 		return
@@ -309,7 +344,7 @@ func serverCallback(userdata unsafe.Pointer, hyperReq *hyper.Request, channel *h
 	res := newResponse(channel)
 	fmt.Printf("Response created\n")
 
-	userData.Server.Handler.ServeHTTP(res, req)
+	userData.server.Handler.ServeHTTP(res, req)
 
 	res.finalize()
 }
@@ -321,7 +356,7 @@ func (srv *Server) handleTask(task *hyper.Task) {
 
 		err := (*hyper.Error)(task.Value())
 		fmt.Printf("error code: %d\n", err.Code())
-		
+
 		var errbuf [256]byte
 		errlen := err.Print(&errbuf[0], unsafe.Sizeof(errbuf))
 		fmt.Printf("details: %s\n", errbuf[:errlen])
@@ -360,15 +395,15 @@ func createIo(conn *conn) *hyper.Io {
 
 func createServiceUserdata() *serviceUserdata {
 	userdata := &serviceUserdata{}
-    if userdata == nil {
-        fmt.Fprintf(os.Stderr, "Failed to allocate service_userdata\n")
-    }
-    return userdata
+	if userdata == nil {
+		fmt.Fprintf(os.Stderr, "Failed to allocate service_userdata\n")
+	}
+	return userdata
 }
 
 func readCb(userdata unsafe.Pointer, ctx *hyper.Context, buf *byte, bufLen uintptr) uintptr {
 	conn := (*conn)(userdata)
-	ret := cnet.Recv(conn.Stream.GetIoWatcherFd(), unsafe.Pointer(buf), bufLen, 0)
+	ret := cnet.Recv(conn.stream.GetIoWatcherFd(), unsafe.Pointer(buf), bufLen, 0)
 
 	if ret >= 0 {
 		return uintptr(ret)
@@ -378,26 +413,26 @@ func readCb(userdata unsafe.Pointer, ctx *hyper.Context, buf *byte, bufLen uintp
 		return hyper.IoError
 	}
 
-	if conn.ReadWaker != nil {
-		conn.ReadWaker.Free()
+	if conn.readWaker != nil {
+		conn.readWaker.Free()
 	}
 
-	if conn.EventMask&c.Uint(libuv.READABLE) == 0 {
-		conn.EventMask |= c.Uint(libuv.READABLE)
-		fmt.Printf("ReadCb Event mask: %d\n", conn.EventMask)
+	if conn.eventMask&c.Uint(libuv.READABLE) == 0 {
+		conn.eventMask |= c.Uint(libuv.READABLE)
+		fmt.Printf("ReadCb Event mask: %d\n", conn.eventMask)
 		if !updateConnRegistrations(conn, false) {
 			return hyper.IoError
 		}
 		fmt.Printf("ReadCb updateConnRegistrations\n")
 	}
 
-	conn.ReadWaker = ctx.Waker()
+	conn.readWaker = ctx.Waker()
 	return hyper.IoPending
 }
 
 func writeCb(userdata unsafe.Pointer, ctx *hyper.Context, buf *byte, bufLen uintptr) uintptr {
 	conn := (*conn)(userdata)
-	ret := cnet.Send(conn.Stream.GetIoWatcherFd(), unsafe.Pointer(buf), bufLen, 0)
+	ret := cnet.Send(conn.stream.GetIoWatcherFd(), unsafe.Pointer(buf), bufLen, 0)
 
 	if ret >= 0 {
 		return uintptr(ret)
@@ -407,22 +442,21 @@ func writeCb(userdata unsafe.Pointer, ctx *hyper.Context, buf *byte, bufLen uint
 		return hyper.IoError
 	}
 
-	if conn.WriteWaker != nil {
-		conn.WriteWaker.Free()
+	if conn.writeWaker != nil {
+		conn.writeWaker.Free()
 	}
 
-	if conn.EventMask&c.Uint(libuv.WRITABLE) == 0 {
-		conn.EventMask |= c.Uint(libuv.WRITABLE)
-		fmt.Printf("WriteCb Event mask: %d\n", conn.EventMask)
+	if conn.eventMask&c.Uint(libuv.WRITABLE) == 0 {
+		conn.eventMask |= c.Uint(libuv.WRITABLE)
+		fmt.Printf("WriteCb Event mask: %d\n", conn.eventMask)
 		if !updateConnRegistrations(conn, false) {
 			return hyper.IoError
 		}
 	}
 
-	conn.WriteWaker = ctx.Waker()
+	conn.writeWaker = ctx.Waker()
 	return hyper.IoPending
 }
-
 
 func onPoll(handle *libuv.Poll, status c.Int, events c.Int) {
 	fmt.Printf("onPoll called\n")
@@ -433,14 +467,14 @@ func onPoll(handle *libuv.Poll, status c.Int, events c.Int) {
 		return
 	}
 
-	if events&c.Int(libuv.READABLE) != 0 && conn.ReadWaker != nil {
-		conn.ReadWaker.Wake()
-		conn.ReadWaker = nil
+	if events&c.Int(libuv.READABLE) != 0 && conn.readWaker != nil {
+		conn.readWaker.Wake()
+		conn.readWaker = nil
 	}
 
-	if events&c.Int(libuv.WRITABLE) != 0 && conn.WriteWaker != nil {
-		conn.WriteWaker.Wake()
-		conn.WriteWaker = nil
+	if events&c.Int(libuv.WRITABLE) != 0 && conn.writeWaker != nil {
+		conn.writeWaker.Wake()
+		conn.writeWaker = nil
 	}
 }
 
@@ -448,26 +482,24 @@ func updateConnRegistrations(conn *conn, create bool) bool {
 	fmt.Println("updateConnRegistrations called")
 
 	events := c.Int(0)
-	if conn.EventMask == 0 {
+	if conn.eventMask == 0 {
 		fmt.Println("No events to poll, skipping poll start.")
 		return true
 	}
-	fmt.Printf("Event mask: %d\n", conn.EventMask)
-	if conn.EventMask&c.Uint(libuv.READABLE) != 0 {
+	fmt.Printf("Event mask: %d\n", conn.eventMask)
+	if conn.eventMask&c.Uint(libuv.READABLE) != 0 {
 		events |= c.Int(libuv.READABLE)
 	}
-	if conn.EventMask&c.Uint(libuv.WRITABLE) != 0 {
+	if conn.eventMask&c.Uint(libuv.WRITABLE) != 0 {
 		events |= c.Int(libuv.WRITABLE)
 	}
 
 	fmt.Printf("Starting poll with events: %d\n", events)
-	r := conn.PollHandle.Start(events, onPoll)
-	//fmt.Println("Poll handle started: %d", r)
+	r := conn.pollHandle.Start(events, onPoll)
 	if r < 0 {
 		fmt.Fprintf(os.Stderr, "uv_poll_start error: %s\n", libuv.Strerror(libuv.Errno(r)))
 		return false
 	}
-	fmt.Printf("Poll handle started: %d\n", r)
 	return true
 }
 
@@ -476,35 +508,34 @@ func createConnData() (*conn, error) {
 	if conn == nil {
 		return nil, fmt.Errorf("failed to allocate conn_data")
 	}
-	conn.IsClosing.Store(false)
-	conn.ClosedHandles = 0
+	conn.isClosing.Store(false)
+	conn.closedHandles = 0
 
 	return conn, nil
 }
 
 func freeConnData(userdata c.Pointer) {
 	conn := (*conn)(userdata)
-	if conn != nil && !conn.IsClosing.Swap(true){
+	if conn != nil && !conn.isClosing.Swap(true) {
 		fmt.Printf("Closing connection...\n")
-		if conn.ReadWaker != nil {
-			conn.ReadWaker.Free()
-			conn.ReadWaker = nil
+		if conn.readWaker != nil {
+			conn.readWaker.Free()
+			conn.readWaker = nil
 		}
-		if conn.WriteWaker != nil {
-			conn.WriteWaker.Free()
-			conn.WriteWaker = nil
+		if conn.writeWaker != nil {
+			conn.writeWaker.Free()
+			conn.writeWaker = nil
 		}
 
-		if (*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).IsClosing() == 0 {
-            (*libuv.Handle)(unsafe.Pointer(&conn.PollHandle)).Close(nil)
-        }
+		if (*libuv.Handle)(unsafe.Pointer(&conn.pollHandle)).IsClosing() == 0 {
+			(*libuv.Handle)(unsafe.Pointer(&conn.pollHandle)).Close(nil)
+		}
 
-        if (*libuv.Handle)(unsafe.Pointer(&conn.Stream)).IsClosing() == 0 {
-            (*libuv.Handle)(unsafe.Pointer(&conn.Stream)).Close(nil)
-        }
+		if (*libuv.Handle)(unsafe.Pointer(&conn.stream)).IsClosing() == 0 {
+			(*libuv.Handle)(unsafe.Pointer(&conn.stream)).Close(nil)
+		}
 	}
 }
-
 
 func closeWalkCb(handle *libuv.Handle, arg c.Pointer) {
 	if handle.IsClosing() == 0 {
@@ -518,8 +549,8 @@ func (srv *Server) Close() error {
 	defer srv.mu.Unlock()
 
 	for c := range srv.activeConnections {
-		if c.Executor != nil {
-			c.Executor.Free()
+		if c.executor != nil {
+			c.executor.Free()
 		}
 		delete(srv.activeConnections, c)
 	}
@@ -530,11 +561,11 @@ func (srv *Server) Close() error {
 	srv.uvLoop.Close()
 
 	if srv.http1Opts != nil {
-        srv.http1Opts.Free()
-    }
-    if srv.http2Opts != nil {
-        srv.http2Opts.Free()
-    }
+		srv.http1Opts.Free()
+	}
+	if srv.http2Opts != nil {
+		srv.http2Opts.Free()
+	}
 	return nil
 }
 
