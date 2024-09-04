@@ -50,6 +50,30 @@ type Request struct {
 
 const defaultChunkSize = 8192
 
+// NOTE: This is not intended to reflect the actual Go version being used.
+// It was changed at the time of Go 1.1 release because the former User-Agent
+// had ended up blocked by some intrusion detection systems.
+// See https://codereview.appspot.com/7532043.
+const defaultUserAgent = "Go-http-client/1.1"
+
+// errMissingHost is returned by Write when there is no Host or URL present in
+// the Request.
+var errMissingHost = errors.New("http: Request.Write on Request with no Host or URL set")
+
+// Headers that Request.Write handles itself and should be skipped.
+var reqWriteExcludeHeader = map[string]bool{
+	"Host":              true, // not in Header map anyway
+	"User-Agent":        true,
+	"Content-Length":    true,
+	"Transfer-Encoding": true,
+	"Trailer":           true,
+}
+
+// requestBodyReadError wraps an error from (*Request).write to indicate
+// that the error came from a Read call on the Request.Body.
+// This error type should not escape the net/http package to users.
+type requestBodyReadError struct{ error }
+
 // NewRequest wraps NewRequestWithContext using context.Background.
 func NewRequest(method, url string, body io.Reader) (*Request, error) {
 	return NewRequestWithContext(context.Background(), method, url, body)
@@ -188,6 +212,22 @@ func (r *Request) closeBody() error {
 	return r.Body.Close()
 }
 
+func (r *Request) isReplayable() bool {
+	if r.Body == nil || r.Body == NoBody || r.GetBody != nil {
+		switch valueOrDefault(r.Method, "GET") {
+		case "GET", "HEAD", "OPTIONS", "TRACE":
+			return true
+		}
+		// The Idempotency-Key, while non-standard, is widely used to
+		// mean a POST or other request is idempotent. See
+		// https://golang.org/issue/19943#issuecomment-421092421
+		if r.Header.has("Idempotency-Key") || r.Header.has("X-Idempotency-Key") {
+			return true
+		}
+	}
+	return false
+}
+
 // Context returns the request's context. To change the context, use
 // Clone or WithContext.
 //
@@ -240,25 +280,6 @@ func (r *Request) ProtoAtLeast(major, minor int) bool {
 		r.ProtoMajor == major && r.ProtoMinor >= minor
 }
 
-// errMissingHost is returned by Write when there is no Host or URL present in
-// the Request.
-var errMissingHost = errors.New("http: Request.Write on Request with no Host or URL set")
-
-// NOTE: This is not intended to reflect the actual Go version being used.
-// It was changed at the time of Go 1.1 release because the former User-Agent
-// had ended up blocked by some intrusion detection systems.
-// See https://codereview.appspot.com/7532043.
-const defaultUserAgent = "Go-http-client/1.1"
-
-// Headers that Request.Write handles itself and should be skipped.
-var reqWriteExcludeHeader = map[string]bool{
-	"Host":              true, // not in Header map anyway
-	"User-Agent":        true,
-	"Content-Length":    true,
-	"Transfer-Encoding": true,
-	"Trailer":           true,
-}
-
 // extraHeaders may be nil
 // waitForContinue may be nil
 // always closes body
@@ -279,7 +300,6 @@ func (r *Request) write(client *hyper.ClientConn, taskData *taskData, exec *hype
 	}
 	// Send it!
 	sendTask := client.Send(hyperReq)
-	taskData.taskId = read
 	sendTask.SetUserdata(c.Pointer(taskData))
 	sendRes := exec.Push(sendTask)
 	if sendRes != hyper.OK {
@@ -482,11 +502,6 @@ func readCookies(h Header, filter string) []*Cookie {
 	return cookies
 }
 
-// requestBodyReadError wraps an error from (*Request).write to indicate
-// that the error came from a Read call on the Request.Body.
-// This error type should not escape the net/http package to users.
-type requestBodyReadError struct{ error }
-
 func idnaASCII(v string) (string, error) {
 	// TODO: Consider removing this check after verifying performance is okay.
 	// Right now punycode verification, length checks, context checks, and the
@@ -518,4 +533,12 @@ func removeZone(host string) string {
 		return host
 	}
 	return host[:j] + host[i:]
+}
+
+// Return value if nonempty, def otherwise.
+func valueOrDefault(value, def string) string {
+	if value != "" {
+		return value
+	}
+	return def
 }

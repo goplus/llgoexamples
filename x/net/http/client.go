@@ -241,7 +241,6 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 
 // didTimeout is non-nil only if err != nil.
 func (c *Client) send(req *Request, deadline time.Time) (resp *Response, didTimeout func() bool, err error) {
-	// TODO(spongehah) cookie(c.send)
 	if c.Jar != nil {
 		for _, cookie := range c.Jar.Cookies(req.URL) {
 			req.AddCookie(cookie)
@@ -309,13 +308,16 @@ func send(ireq *Request, rt RoundTripper, deadline time.Time) (resp *Response, d
 	}
 
 	// TODO(spongehah) timeout(send)
+	//stopTimer, didTimeout := setRequestCancel(req, rt, deadline)
+	req.timeoutch = make(chan struct{}, 1)
 	req.deadline = deadline
+	req.ctx.Done()
 	if deadline.IsZero() {
 		didTimeout = alwaysFalse
+		defer close(req.timeoutch)
 	} else {
 		didTimeout = func() bool { return req.timer.GetDueIn() == 0 }
 	}
-	//stopTimer, didTimeout := setRequestCancel(req, rt, deadline)
 
 	resp, err = rt.RoundTrip(req)
 	if err != nil {
@@ -488,7 +490,7 @@ func knownRoundTripperImpl(rt RoundTripper, req *Request) bool {
 			return knownRoundTripperImpl(altRT, req)
 		}
 		return true
-		// TODO(spongehah)
+		// TODO(spongehah) http2
 		//case *http2Transport, http2noDialH2RoundTripper:
 		//	return true
 	}

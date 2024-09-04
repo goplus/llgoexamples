@@ -15,6 +15,7 @@ func main() {
 		fmt.Println(err)
 		return
 	}
+	defer resp.Body.Close()
 	fmt.Println(resp.Status)
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -22,5 +23,4 @@ func main() {
 		return
 	}
 	fmt.Println(string(body))
-	defer resp.Body.Close()
 }

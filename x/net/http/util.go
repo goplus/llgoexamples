@@ -7,7 +7,7 @@ import (
 
 	"golang.org/x/net/idna"
 
-	"github.com/goplus/llgo/x/net"
+	"github.com/goplus/llgoexamples/x/net"
 )
 
 /**

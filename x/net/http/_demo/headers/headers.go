@@ -36,6 +36,7 @@ func main() {
 		println(err.Error())
 		return
 	}
+	defer resp.Body.Close()
 	fmt.Println(resp.Status)
 	resp.PrintHeaders()
 	body, err := io.ReadAll(resp.Body)
@@ -44,5 +45,4 @@ func main() {
 		return
 	}
 	fmt.Println(string(body))
-	defer resp.Body.Close()
 }

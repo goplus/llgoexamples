@@ -19,6 +19,7 @@ func main() {
 		fmt.Println(err)
 		return
 	}
+	defer resp.Body.Close()
 	fmt.Println(resp.Status, "read bytes: ", resp.ContentLength)
 	fmt.Println(resp.Proto)
 	resp.PrintHeaders()
@@ -28,5 +29,4 @@ func main() {
 		return
 	}
 	fmt.Println(string(body))
-	defer resp.Body.Close()
 }

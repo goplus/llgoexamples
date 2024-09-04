@@ -20,12 +20,10 @@ func main() {
 		return
 	}
 	defer resp.Body.Close()
-
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	fmt.Println(string(body))
-	defer resp.Body.Close()
 }
