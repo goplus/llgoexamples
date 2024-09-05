@@ -16,6 +16,7 @@ type response struct {
 	body       []byte
 	channel    *hyper.ResponseChannel
 	resp       *hyper.Response
+	request    *Request
 }
 
 type body struct {
@@ -24,13 +25,29 @@ type body struct {
 	readLen uintptr
 }
 
+type taskData struct {
+	body *body
+	conn *conn
+	hyperTaskID 
+}
+
+type hyperTaskID int
+
+const (
+	taskSetBody hyperTaskID = iota
+	taskGetBody
+)
+
+
+
 var DefaultChunkSize uintptr = 8192
 
-func newResponse(channel *hyper.ResponseChannel) *response {
+func newResponse(request *Request, channel *hyper.ResponseChannel) *response {
 	fmt.Printf("newResponse called\n")
 	resp := response{
 		header:  make(Header),
 		channel: channel,
+		request: request,
 	}
 	return &resp
 }
@@ -90,6 +107,12 @@ func (r *response) WriteHeader(statusCode int) {
 
 func (r *response) finalize() error {
 	fmt.Printf("finalize called\n")
+	err := r.request.Body.Close()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("request body closed\n")
+
 	if !r.written {
 		r.WriteHeader(200)
 	}
@@ -105,8 +128,13 @@ func (r *response) finalize() error {
 	if body == nil {
 		return fmt.Errorf("failed to create body")
 	}
+	taskData := taskData{
+		body: &bodyData,
+		conn: nil,
+		hyperTaskID: taskSetBody,
+	}
 	body.SetDataFunc(setBodyDataFunc)
-	body.SetUserdata(unsafe.Pointer(&bodyData), nil)
+	body.SetUserdata(unsafe.Pointer(&taskData), nil)
 	fmt.Printf("bodyData userdata set\n")
 
 	fmt.Printf("bodyData set\n")
@@ -124,12 +152,13 @@ func (r *response) finalize() error {
 
 func setBodyDataFunc(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
 	fmt.Printf("setBodyDataFunc called\n")
-	body := (*body)(userdata)
+	body := (*taskData)(userdata).body
 
 	if body.len > 0 {
 		//debug
 		fmt.Println("<")
 		fmt.Printf("%s", string(body.data))
+		fmt.Println("")
 
 		if body.len > DefaultChunkSize {
 			*chunk = hyper.CopyBuf(&body.data[body.readLen], DefaultChunkSize)

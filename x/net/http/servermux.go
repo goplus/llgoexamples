@@ -41,7 +41,6 @@ func (mux *ServeMux) HandleFunc(pattern string, handler func(ResponseWriter, *Re
 }
 
 func (mux *ServeMux) Handle(pattern string, handler Handler) {
-	fmt.Printf("Handle called with pattern: %s\n", pattern)
 	mux.mu.Lock()
 	defer mux.mu.Unlock()
 

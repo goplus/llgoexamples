@@ -137,6 +137,12 @@ func (conn *conn) readRequest(hyperReq *hyper.Request) (*Request, error) {
 	if body != nil {
 		req.Body, conn.bodyWriter = io.Pipe()
 		task := body.Foreach(getBodyChunk, c.Pointer(conn.bodyWriter), nil)
+		taskData := taskData {
+			body: nil,
+			conn: conn,
+			hyperTaskID: taskGetBody,
+		}
+		task.SetUserdata(c.Pointer(&taskData), nil)
 		if task != nil {
 			r := conn.executor.Push(task)
 			if r != hyper.OK {
@@ -175,6 +181,10 @@ func addHeader(data unsafe.Pointer, name *byte, nameLen uintptr, value *byte, va
 func getBodyChunk(userdata c.Pointer, chunk *hyper.Buf) c.Int {
 	fmt.Printf("getBodyChunk called\n")
 	writer := (*io.PipeWriter)(userdata)
+	if writer == nil {
+		fmt.Printf("writer is nil\n")
+		return hyper.IterBreak
+	}
 	buf := chunk.Bytes()
 	len := chunk.Len()
 	bytes := unsafe.Slice(buf, len)
@@ -182,13 +192,21 @@ func getBodyChunk(userdata c.Pointer, chunk *hyper.Buf) c.Int {
 	fmt.Printf("Writing %d bytes to response body\n", len)
 	fmt.Printf("Body chunk: %s\n", string(bytes))
 
-	_, err := writer.Write(bytes)
-	fmt.Printf("Body chunk written\n")
-	if err != nil {
-		fmt.Println("Error writing to response body:", err)
-		writer.Close()
-		return hyper.IterBreak
-	}
+	go func() {
+		count, err := writer.Write(bytes)
+		fmt.Printf("Body chunk written: %d bytes\n", count)
+		if err != nil {
+			fmt.Println("Error writing to response body:", err)
+			writer.Close()
+		}
+	}()
+	// count, err := writer.Write(bytes)
+	// fmt.Printf("Body chunk written: %d bytes\n", count)
+	// if err != nil {
+	// 	fmt.Println("Error writing to response body:", err)
+	// 	writer.Close()
+	// 	return hyper.IterBreak
+	// }
 
 	return hyper.IterContinue
 }
