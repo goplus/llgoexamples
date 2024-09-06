@@ -26,6 +26,7 @@ type body struct {
 }
 
 type taskData struct {
+	hyperBody *hyper.Body
 	body *body
 	conn *conn
 	hyperTaskID 
@@ -48,6 +49,7 @@ func newResponse(request *Request, channel *hyper.ResponseChannel) *response {
 		header:  make(Header),
 		channel: channel,
 		request: request,
+		resp: hyper.NewResponse(),
 	}
 	return &resp
 }
@@ -72,11 +74,9 @@ func (r *response) WriteHeader(statusCode int) {
 	r.written = true
 	r.statusCode = statusCode
 
-	newResp := hyper.NewResponse()
+	r.resp.SetStatus(uint16(statusCode))
 
-	newResp.SetStatus(uint16(statusCode))
-
-	headers := newResp.Headers()
+	headers := r.resp.Headers()
 	for key, values := range r.header {
 		valueLen := len(values)
 		if valueLen > 1 {
@@ -95,14 +95,12 @@ func (r *response) WriteHeader(statusCode int) {
 	}
 
 	//debug
-	fmt.Printf("< HTTP/1.1 %d\n", statusCode)
-	for key, values := range r.header {
-		for _, value := range values {
-			fmt.Printf("< %s: %s\n", key, value)
-		}
-	}
-
-	r.resp = newResp
+	// fmt.Printf("< HTTP/1.1 %d\n", statusCode)
+	// for key, values := range r.header {
+	// 	for _, value := range values {
+	// 		fmt.Printf("< %s: %s\n", key, value)
+	// 	}
+	// }
 }
 
 func (r *response) finalize() error {
@@ -128,13 +126,14 @@ func (r *response) finalize() error {
 	if body == nil {
 		return fmt.Errorf("failed to create body")
 	}
-	taskData := taskData{
+	taskData := &taskData{
+		hyperBody: nil,
 		body: &bodyData,
 		conn: nil,
 		hyperTaskID: taskSetBody,
 	}
 	body.SetDataFunc(setBodyDataFunc)
-	body.SetUserdata(unsafe.Pointer(&taskData), nil)
+	body.SetUserdata(unsafe.Pointer(taskData), nil)
 	fmt.Printf("bodyData userdata set\n")
 
 	fmt.Printf("bodyData set\n")
@@ -146,13 +145,14 @@ func (r *response) finalize() error {
 	fmt.Printf("body set\n")
 
 	r.channel.Send(r.resp)
-	fmt.Printf("response sent\n")
+	fmt.Println("response sent")
 	return nil
 }
 
 func setBodyDataFunc(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
 	fmt.Printf("setBodyDataFunc called\n")
-	body := (*taskData)(userdata).body
+	taskData := (*taskData)(userdata)
+	body := taskData.body
 
 	if body.len > 0 {
 		//debug

@@ -136,11 +136,14 @@ func (conn *conn) readRequest(hyperReq *hyper.Request) (*Request, error) {
 	body := hyperReq.Body()
 	if body != nil {
 		req.Body, conn.bodyWriter = io.Pipe()
-		task := body.Foreach(getBodyChunk, c.Pointer(conn.bodyWriter), nil)
+		//task := body.Foreach(getBodyChunk, c.Pointer(conn.bodyWriter), nil)
+		task := body.Data()
+		taskID := taskGetBody
 		taskData := taskData {
+			hyperBody: body,
 			body: nil,
 			conn: conn,
-			hyperTaskID: taskGetBody,
+			hyperTaskID: taskID,
 		}
 		task.SetUserdata(c.Pointer(&taskData), nil)
 		if task != nil {
