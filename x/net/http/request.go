@@ -35,7 +35,7 @@ type Request struct {
 	timeout    time.Duration
 }
 
-func (conn *conn) readRequest(hyperReq *hyper.Request) (*Request, error) {
+func (conn *conn) readRequest(server *Server, hyperReq *hyper.Request) (*Request, error) {
 	println("readRequest called")
 	req := Request{
 		Header:  make(Header),
@@ -135,7 +135,9 @@ func (conn *conn) readRequest(hyperReq *hyper.Request) (*Request, error) {
 
 	body := hyperReq.Body()
 	if body != nil {
-		req.Body, conn.bodyWriter = io.Pipe()
+		requestBody := newRequestBody()
+		conn.requestBody = requestBody
+		req.Body = requestBody
 		//task := body.Foreach(getBodyChunk, c.Pointer(conn.bodyWriter), nil)
 		task := body.Data()
 		taskID := taskGetBody
@@ -181,35 +183,28 @@ func addHeader(data unsafe.Pointer, name *byte, nameLen uintptr, value *byte, va
 	return hyper.IterContinue
 }
 
-func getBodyChunk(userdata c.Pointer, chunk *hyper.Buf) c.Int {
-	fmt.Printf("getBodyChunk called\n")
-	writer := (*io.PipeWriter)(userdata)
-	if writer == nil {
-		fmt.Printf("writer is nil\n")
-		return hyper.IterBreak
-	}
-	buf := chunk.Bytes()
-	len := chunk.Len()
-	bytes := unsafe.Slice(buf, len)
-	//debug
-	fmt.Printf("Writing %d bytes to response body\n", len)
-	fmt.Printf("Body chunk: %s\n", string(bytes))
+// func getBodyChunk(userdata c.Pointer, chunk *hyper.Buf) c.Int {
+// 	fmt.Printf("getBodyChunk called\n")
+// 	writer := (*io.PipeWriter)(userdata)
+// 	if writer == nil {
+// 		fmt.Printf("writer is nil\n")
+// 		return hyper.IterBreak
+// 	}
+// 	buf := chunk.Bytes()
+// 	len := chunk.Len()
+// 	bytes := unsafe.Slice(buf, len)
+// 	//debug
+// 	fmt.Printf("Writing %d bytes to response body\n", len)
+// 	fmt.Printf("Body chunk: %s\n", string(bytes))
 
-	go func() {
-		count, err := writer.Write(bytes)
-		fmt.Printf("Body chunk written: %d bytes\n", count)
-		if err != nil {
-			fmt.Println("Error writing to response body:", err)
-			writer.Close()
-		}
-	}()
-	// count, err := writer.Write(bytes)
-	// fmt.Printf("Body chunk written: %d bytes\n", count)
-	// if err != nil {
-	// 	fmt.Println("Error writing to response body:", err)
-	// 	writer.Close()
-	// 	return hyper.IterBreak
-	// }
+// 	go func() {
+// 		count, err := writer.Write(bytes)
+// 		fmt.Printf("Body chunk written: %d bytes\n", count)
+// 		if err != nil {
+// 			fmt.Println("Error writing to response body:", err)
+// 			writer.Close()
+// 		}
+// 	}()
 
-	return hyper.IterContinue
-}
+// 	return hyper.IterContinue
+// }
