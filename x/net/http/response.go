@@ -29,7 +29,7 @@ type taskData struct {
 	hyperBody *hyper.Body
 	body *body
 	conn *conn
-	hyperTaskID 
+	hyperTaskID hyperTaskID
 }
 
 type hyperTaskID int
@@ -38,8 +38,6 @@ const (
 	taskSetBody hyperTaskID = iota
 	taskGetBody
 )
-
-
 
 var DefaultChunkSize uintptr = 8192
 
@@ -95,12 +93,12 @@ func (r *response) WriteHeader(statusCode int) {
 	}
 
 	//debug
-	// fmt.Printf("< HTTP/1.1 %d\n", statusCode)
-	// for key, values := range r.header {
-	// 	for _, value := range values {
-	// 		fmt.Printf("< %s: %s\n", key, value)
-	// 	}
-	// }
+	fmt.Printf("< HTTP/1.1 %d\n", statusCode)
+	for key, values := range r.header {
+		for _, value := range values {
+			fmt.Printf("< %s: %s\n", key, value)
+		}
+	}
 }
 
 func (r *response) finalize() error {

@@ -35,7 +35,7 @@ type Request struct {
 	timeout    time.Duration
 }
 
-func (conn *conn) readRequest(server *Server, hyperReq *hyper.Request) (*Request, error) {
+func (conn *conn) readRequest(hyperReq *hyper.Request) (*Request, error) {
 	println("readRequest called")
 	req := Request{
 		Header:  make(Header),
@@ -135,16 +135,17 @@ func (conn *conn) readRequest(server *Server, hyperReq *hyper.Request) (*Request
 
 	body := hyperReq.Body()
 	if body != nil {
+		fmt.Println("Body is not nil!!!!!!!")
 		requestBody := newRequestBody()
 		conn.requestBody = requestBody
 		req.Body = requestBody
 		//task := body.Foreach(getBodyChunk, c.Pointer(conn.bodyWriter), nil)
 		task := body.Data()
 		taskID := taskGetBody
-		taskData := taskData {
-			hyperBody: body,
-			body: nil,
-			conn: conn,
+		taskData := taskData{
+			hyperBody:   body,
+			body:        nil,
+			conn:        conn,
 			hyperTaskID: taskID,
 		}
 		task.SetUserdata(c.Pointer(&taskData), nil)
@@ -163,7 +164,7 @@ func (conn *conn) readRequest(server *Server, hyperReq *hyper.Request) (*Request
 		return nil, fmt.Errorf("failed to get request body")
 	}
 
-	defer hyperReq.Free()
+	hyperReq.Free()
 
 	return &req, nil
 }
