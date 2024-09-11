@@ -19,9 +19,9 @@ type muxEntry struct {
 var DefaultServeMux = &ServeMux{m: make(map[string]muxEntry)}
 
 func (mux *ServeMux) ServeHTTP(w ResponseWriter, r *Request) {
-	fmt.Printf("ServeHTTP called\n")
+	fmt.Printf("[debug] ServeHTTP called\n")
 	h, pattern := mux.Handler(r)
-	fmt.Printf("Handler found for pattern: %s\n", pattern)
+	fmt.Printf("[debug] Handler found for pattern: %s\n", pattern)
 	h.ServeHTTP(w, r)
 }
 

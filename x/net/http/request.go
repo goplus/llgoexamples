@@ -36,7 +36,7 @@ type Request struct {
 }
 
 func (conn *conn) readRequest(hyperReq *hyper.Request) (*Request, error) {
-	println("readRequest called")
+	println("[debug] readRequest called")
 	req := Request{
 		Header:  make(Header),
 		timeout: 0,
@@ -135,11 +135,6 @@ func (conn *conn) readRequest(hyperReq *hyper.Request) (*Request, error) {
 
 	body := hyperReq.Body()
 	if body != nil {
-		fmt.Println("Body is not nil!!!!!!!")
-		requestBody := newRequestBody()
-		conn.requestBody = requestBody
-		req.Body = requestBody
-		//task := body.Foreach(getBodyChunk, c.Pointer(conn.bodyWriter), nil)
 		task := body.Data()
 		taskID := taskGetBody
 		taskData := taskData{
@@ -149,6 +144,12 @@ func (conn *conn) readRequest(hyperReq *hyper.Request) (*Request, error) {
 			hyperTaskID: taskID,
 		}
 		task.SetUserdata(c.Pointer(&taskData), nil)
+		requestBody := newRequestBody(conn.asyncHandle)
+		conn.requestBody = requestBody
+		req.Body = requestBody
+
+		conn.asyncHandle.SetData(c.Pointer(&taskData))
+		fmt.Println("[debug] async task set")
 		if task != nil {
 			r := conn.executor.Push(task)
 			if r != hyper.OK {
@@ -183,29 +184,3 @@ func addHeader(data unsafe.Pointer, name *byte, nameLen uintptr, value *byte, va
 	}
 	return hyper.IterContinue
 }
-
-// func getBodyChunk(userdata c.Pointer, chunk *hyper.Buf) c.Int {
-// 	fmt.Printf("getBodyChunk called\n")
-// 	writer := (*io.PipeWriter)(userdata)
-// 	if writer == nil {
-// 		fmt.Printf("writer is nil\n")
-// 		return hyper.IterBreak
-// 	}
-// 	buf := chunk.Bytes()
-// 	len := chunk.Len()
-// 	bytes := unsafe.Slice(buf, len)
-// 	//debug
-// 	fmt.Printf("Writing %d bytes to response body\n", len)
-// 	fmt.Printf("Body chunk: %s\n", string(bytes))
-
-// 	go func() {
-// 		count, err := writer.Write(bytes)
-// 		fmt.Printf("Body chunk written: %d bytes\n", count)
-// 		if err != nil {
-// 			fmt.Println("Error writing to response body:", err)
-// 			writer.Close()
-// 		}
-// 	}()
-
-// 	return hyper.IterContinue
-// }

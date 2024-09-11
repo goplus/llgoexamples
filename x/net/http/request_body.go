@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"sync"
+
+	"github.com/goplus/llgo/c/libuv"
 )
 
 type onceError struct {
@@ -28,9 +30,9 @@ func (a *onceError) Load() error {
 }
 
 type requestBody struct {
-	chunk   []byte
-	readCh  chan []byte
-	readyCh chan struct{}
+	chunk       []byte
+	readCh      chan []byte
+	asyncHandle *libuv.Async
 
 	once sync.Once
 	done chan struct{}
@@ -42,60 +44,42 @@ var (
 	ErrClosedRequestBody = errors.New("request body: read/write on closed body")
 )
 
-func newRequestBody() *requestBody {
+func newRequestBody(asyncHandle *libuv.Async) *requestBody {
 	return &requestBody{
-		readCh:  make(chan []byte, 1),
-		readyCh: make(chan struct{}, 1),
-		done:    make(chan struct{}),
+		readCh:      make(chan []byte, 1),
+		done:        make(chan struct{}),
+		asyncHandle: asyncHandle,
 	}
 }
 
 func (rb *requestBody) Read(p []byte) (n int, err error) {
-	fmt.Println("RequestBody Read called")
-	select {
-	case <-rb.done:
-		fmt.Println("Read done")
-		return 0, rb.rerr.Load()
-	default:
-	}
-
+	fmt.Println("[debug] requestBody.Read called")
+	// If there are still unread chunks, read them first
 	if len(rb.chunk) > 0 {
-		fmt.Println("Read remaining chunk")
 		n = copy(p, rb.chunk)
 		rb.chunk = rb.chunk[n:]
-		if len(rb.chunk) > 0 {
-			return
-		}
+		return n, nil
 	}
 
-	fmt.Println("readyCh waiting")
+	// Attempt to read a new chunk from a channel
 	select {
-    case rb.readyCh <- struct{}{}:
-        fmt.Println("readyCh signaled")
-    default:
-        fmt.Println("readyCh skipped (channel full)")
-    }
-
-	select {
-    case rb.chunk = <-rb.readCh:
-        fmt.Printf("Read chunk received: %s\n", string(rb.chunk))
-    case <-rb.done:
-        return 0, rb.rerr.Load()
-	default:
-		if len(rb.chunk) == 0 {
-			fmt.Println("Read ended")
-			return 0, io.EOF
+	case chunk, ok := <-rb.readCh:
+		if !ok {
+			// The channel has been closed, indicating that all data has been read
+			return 0, rb.readCloseError()
 		}
+		n = copy(p, chunk)
+		if n < len(chunk) {
+			// If the capacity of p is insufficient to hold the whole chunk, save the rest of the chunk
+			rb.chunk = chunk[n:]
+		}
+		fmt.Println("[debug] requestBody.Read async send")
+		rb.asyncHandle.Send()
+		return n, nil
+	case <-rb.done:
+		// If the done channel is closed, the read needs to be terminated
+		return 0, rb.readCloseError()
 	}
-	fmt.Printf("Read chunk received: %s\n", string(rb.chunk))
-	if len(rb.chunk) == 0 {
-		fmt.Println("Read ended")
-		return 0, io.EOF
-	}
-	n = copy(p, rb.chunk)
-	rb.chunk = rb.chunk[n:]
-	fmt.Printf("Read chunk copied: %d bytes\n", n)
-	return
 }
 
 func (rb *requestBody) readCloseError() error {
@@ -106,14 +90,15 @@ func (rb *requestBody) readCloseError() error {
 }
 
 func (rb *requestBody) closeRead(err error) error {
-	fmt.Println("closeRead called")
+	fmt.Println("[debug] RequestBody closeRead called")
 	if err == nil {
-		err = ErrClosedRequestBody
+		err = io.EOF
 	}
 	rb.rerr.Store(err)
 	rb.once.Do(func() {
 		close(rb.done)
 	})
+	//close(rb.done)
 	return nil
 }
 

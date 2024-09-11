@@ -55,6 +55,7 @@ type conn struct {
 	executor      *hyper.Executor
 	remoteAddr    string
 	requestBody   *requestBody
+	asyncHandle   *libuv.Async
 }
 
 type serviceUserdata struct {
@@ -163,7 +164,7 @@ func HandleFunc(pattern string, handler func(ResponseWriter, *Request)) {
 }
 
 func onNewConnection(serverStream *libuv.Stream, status c.Int) {
-	fmt.Println("onNewConnection called")
+	fmt.Println("[debug] onNewConnection called")
 	if status < 0 {
 		fmt.Printf("New connection error: %s\n", libuv.Strerror(libuv.Errno(status)))
 		return
@@ -181,11 +182,16 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 		return
 	}
 
+	fmt.Println("[debug] async handle creating")
+
+	conn.asyncHandle = &libuv.Async{}
+	srv.uvLoop.Async(conn.asyncHandle, onAsync)
+
 	libuv.InitTcp(srv.uvLoop, &conn.stream)
 	conn.stream.Data = unsafe.Pointer(conn)
 
 	if serverStream.Accept((*libuv.Stream)(unsafe.Pointer(&conn.stream))) == 0 {
-		fmt.Println("Accepted new connection")
+		fmt.Println("[debug] Accepted new connection")
 		r := libuv.PollInit(srv.uvLoop, &conn.pollHandle, libuv.OsFd(conn.stream.GetIoWatcherFd()))
 		if r < 0 {
 			fmt.Fprintf(os.Stderr, "uv_poll_init error: %s\n", libuv.Strerror(libuv.Errno(r)))
@@ -234,9 +240,9 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 		}
 		conn.executor = executor
 
-		fmt.Println("Conn created")
+		fmt.Println("[debug] Conn created")
 		srv.trackConn(conn, true)
-		fmt.Println("Conn tracked")
+		fmt.Println("[debug] Conn tracked")
 
 		userdata.conn = conn
 
@@ -275,9 +281,24 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 		serverconn := hyper.ServeHttpXConnection(http1Opts, http2Opts, io, service)
 		conn.executor.Push(serverconn)
 	} else {
-		fmt.Println("Client not accepted")
+		fmt.Println("[debug] Client not accepted")
 		(*libuv.Handle)(unsafe.Pointer(&conn.pollHandle)).Close(nil)
 		(*libuv.Handle)(unsafe.Pointer(&conn.stream)).Close(nil)
+	}
+}
+
+func onAsync(asyncHandle *libuv.Async) {
+	fmt.Println("[debug] onAsync called")
+	taskData := (*taskData)(asyncHandle.GetData())
+	dataTask := taskData.hyperBody.Data()
+	dataTask.SetUserdata(c.Pointer(taskData), nil)
+	if dataTask != nil {
+		r := taskData.conn.executor.Push(dataTask)
+		fmt.Printf("[debug] onAsync push data task: %d\n", r)
+		if r != hyper.OK {
+			fmt.Printf("failed to push data task: %d\n", r)
+			dataTask.Free()
+		}
 	}
 }
 
@@ -307,9 +328,9 @@ func onIdle(handle *libuv.Idle) {
 		if conn.executor != nil {
 			task := conn.executor.Poll()
 			for task != nil {
-				srv.handleTask(conn, task)
+				srv.handleTask(task)
+				//srv.handleRead(conn, task)
 				task = conn.executor.Poll()
-				srv.handleRead(conn, task)
 			}
 		}
 	}
@@ -335,7 +356,7 @@ func serverCallback(userdata unsafe.Pointer, hyperReq *hyper.Request, channel *h
 	}
 
 	res := newResponse(req, channel)
-	fmt.Printf("Response created\n")
+	fmt.Println("[debug] Response created")
 
 	go func() {
 		userData.server.Handler.ServeHTTP(res, req)
@@ -347,58 +368,58 @@ func serverCallback(userdata unsafe.Pointer, hyperReq *hyper.Request, channel *h
 	// res.finalize()
 }
 
-func (srv *Server) handleRead(conn *conn, task *hyper.Task) {
-	payload := (*taskData)(task.Userdata())
-	if payload == nil {
-		fmt.Println("taskData is nil, no need to handle read")
-		return
-	}
-	
-	select {
-	case <-conn.requestBody.readyCh:
-		fmt.Println("readyCh signaled")
+// func (srv *Server) handleRead(conn *conn, task *hyper.Task) {
+// 	payload := (*taskData)(task.Userdata())
+// 	if payload == nil {
+// 		fmt.Println("taskData is nil, no need to handle read")
+// 		return
+// 	}
 
-		fmt.Println("taskGetBody get body task form readyCh")
-		getBodyTask := payload.hyperBody.Data()
-		getBodyTask.SetUserdata(c.Pointer(payload), nil)
-		if getBodyTask != nil {
-			fmt.Println("taskGetBody push get body task")
-			r := payload.conn.executor.Push(getBodyTask)
-			fmt.Printf("taskGetBody push get body task: %d\n", r)
-			if r != hyper.OK {
-				fmt.Printf("failed to push get body task: %d\n", r)
-				getBodyTask.Free()
-			}
-		}
-	default:
-		fmt.Println("readToReadCh not signaled")
-	}
-}
+// 	select {
+// 	case <-conn.requestBody.readyCh:
+// 		fmt.Println("readyCh signaled")
 
-func (srv *Server) handleTask(conn *conn, task *hyper.Task) {
+// 		fmt.Println("taskGetBody get body task form readyCh")
+// 		getBodyTask := payload.hyperBody.Data()
+// 		getBodyTask.SetUserdata(c.Pointer(payload), nil)
+// 		if getBodyTask != nil {
+// 			fmt.Println("taskGetBody push get body task")
+// 			r := payload.conn.executor.Push(getBodyTask)
+// 			fmt.Printf("taskGetBody push get body task: %d\n", r)
+// 			if r != hyper.OK {
+// 				fmt.Printf("failed to push get body task: %d\n", r)
+// 				getBodyTask.Free()
+// 			}
+// 		}
+// 	default:
+// 		fmt.Println("readToReadCh not signaled")
+// 	}
+// }
+
+func (srv *Server) handleTask(task *hyper.Task) {
 	taskType := task.Type()
 	//debug
 	switch taskType {
 	case hyper.TaskEmpty:
-		fmt.Println("Task type: Empty")
+		fmt.Println("[debug] Task type: Empty")
 	case hyper.TaskBuf:
-		fmt.Println("Task type: Buffer")
+		fmt.Println("[debug] Task type: Buffer")
 	case hyper.TaskError:
-		fmt.Println("Task type: Error")
+		fmt.Println("[debug] Task type: Error")
 	case hyper.TaskServerconn:
-		fmt.Println("Task type: Serverconn")
+		fmt.Println("[debug] Task type: Serverconn")
 	default:
-		fmt.Println("Unknown task type")
+		fmt.Println("[debug] Unknown task type")
 	}
 
 	payload := (*taskData)(task.Userdata())
 	if payload != nil {
 		taskID := payload.hyperTaskID
-	
+
 		// select {
 		// case <-conn.requestBody.readyCh:
 		// 	fmt.Println("readyCh recieved")
-	
+
 		// 	fmt.Println("taskGetBody get body task form readyCh")
 		// 	getBodyTask := payload.hyperBody.Data()
 		// 	getBodyTask.SetUserdata(c.Pointer(payload), nil)
@@ -414,67 +435,67 @@ func (srv *Server) handleTask(conn *conn, task *hyper.Task) {
 		// default:
 		// 	fmt.Println("readyCh not recieved")
 		// }
-	
+
 		if taskID == taskGetBody {
-			fmt.Println("taskGetBody called")
+			fmt.Println("[debug] taskGetBody called")
 			if taskType == hyper.TaskError {
-				fmt.Println("taskGetBody error")
+				fmt.Println("[debug] taskGetBody error")
 				err := (*hyper.Error)(task.Value())
 				fmt.Printf("error code: %d\n", err.Code())
-	
+
 				var errbuf [256]byte
 				errlen := err.Print(&errbuf[0], unsafe.Sizeof(errbuf))
 				fmt.Printf("details: %s\n", errbuf[:errlen])
 				err.Free()
 				task.Free()
 			}
-	
+
 			if taskType == hyper.TaskBuf {
-				fmt.Println("taskGetBody write buf")
+				fmt.Println("[debug] taskGetBody write buf")
 				buf := (*hyper.Buf)(task.Value())
 				bytes := unsafe.Slice(buf.Bytes(), buf.Len())
-				fmt.Printf("taskGetBody writing to bodyWriter: %s\n", string(bytes))
+				fmt.Printf("[debug] taskGetBody writing to bodyWriter: %s\n", string(bytes))
 				buf.Free()
 				task.Free()
-				fmt.Println("taskGetBody free task")
+				fmt.Println("[debug] taskGetBody free task")
 				payload.conn.requestBody.readCh <- bytes
-				fmt.Println("taskGetBody wrote to bodyWriter")
+				fmt.Println("[debug] taskGetBody wrote to bodyWriter")
 			}
-	
+
 			if taskType == hyper.TaskEmpty {
-				fmt.Println("taskGetBody close requestBody")
+				fmt.Println("[debug] taskGetBody close requestBody")
 				payload.conn.requestBody.Close()
-				fmt.Println("taskGetBody free task")
+				fmt.Println("[debug] taskGetBody free task")
 				task.Free()
 			}
 		} else if taskID == taskSetBody {
-			fmt.Println("taskSetBody called")
+			fmt.Println("[debug] taskSetBody called")
 			if taskType == hyper.TaskError {
-				fmt.Println("taskSetBody error")
+				fmt.Println("[debug] taskSetBody error")
 				err := (*hyper.Error)(task.Value())
 				fmt.Printf("error code: %d\n", err.Code())
-	
+
 				var errbuf [256]byte
 				errlen := err.Print(&errbuf[0], unsafe.Sizeof(errbuf))
 				fmt.Printf("details: %s\n", errbuf[:errlen])
 				err.Free()
 				task.Free()
 			}
-	
+
 			if taskType == hyper.TaskEmpty {
-				fmt.Println("taskSetBody free task")
+				fmt.Println("[debug] taskSetBody free task")
 				task.Free()
 			}
 		}
 	}
 
 	if taskType == hyper.TaskEmpty {
-		fmt.Println("taskEmpty called")
+		fmt.Println("[debug] taskEmpty called")
 		task.Free()
 	}
 
 	if taskType == hyper.TaskServerconn {
-		fmt.Println("taskServerconn called")
+		fmt.Println("[debug] taskServerconn called")
 		task.Free()
 	}
 }
@@ -526,11 +547,11 @@ func readCb(userdata unsafe.Pointer, ctx *hyper.Context, buf *byte, bufLen uintp
 
 	if conn.eventMask&c.Uint(libuv.READABLE) == 0 {
 		conn.eventMask |= c.Uint(libuv.READABLE)
-		fmt.Printf("ReadCb Event mask: %d\n", conn.eventMask)
+		fmt.Printf("[debug] ReadCb Event mask: %d\n", conn.eventMask)
 		if !updateConnRegistrations(conn, false) {
 			return hyper.IoError
 		}
-		fmt.Printf("ReadCb updateConnRegistrations\n")
+		fmt.Printf("[debug] ReadCb updateConnRegistrations\n")
 	}
 
 	conn.readWaker = ctx.Waker()
@@ -555,7 +576,7 @@ func writeCb(userdata unsafe.Pointer, ctx *hyper.Context, buf *byte, bufLen uint
 
 	if conn.eventMask&c.Uint(libuv.WRITABLE) == 0 {
 		conn.eventMask |= c.Uint(libuv.WRITABLE)
-		fmt.Printf("WriteCb Event mask: %d\n", conn.eventMask)
+		fmt.Printf("[debug] WriteCb Event mask: %d\n", conn.eventMask)
 		if !updateConnRegistrations(conn, false) {
 			return hyper.IoError
 		}
@@ -566,7 +587,7 @@ func writeCb(userdata unsafe.Pointer, ctx *hyper.Context, buf *byte, bufLen uint
 }
 
 func onPoll(handle *libuv.Poll, status c.Int, events c.Int) {
-	fmt.Printf("onPoll called\n")
+	fmt.Printf("[debug] onPoll called\n")
 	conn := (*conn)((*libuv.Handle)(unsafe.Pointer(handle)).GetData())
 
 	if status < 0 {
@@ -586,14 +607,14 @@ func onPoll(handle *libuv.Poll, status c.Int, events c.Int) {
 }
 
 func updateConnRegistrations(conn *conn, create bool) bool {
-	fmt.Println("updateConnRegistrations called")
+	fmt.Println("[debug] updateConnRegistrations called")
 
 	events := c.Int(0)
 	if conn.eventMask == 0 {
-		fmt.Println("No events to poll, skipping poll start.")
+		fmt.Println("[debug] No events to poll, skipping poll start.")
 		return true
 	}
-	fmt.Printf("Event mask: %d\n", conn.eventMask)
+	fmt.Printf("[debug] Event mask: %d\n", conn.eventMask)
 	if conn.eventMask&c.Uint(libuv.READABLE) != 0 {
 		events |= c.Int(libuv.READABLE)
 	}
@@ -601,7 +622,7 @@ func updateConnRegistrations(conn *conn, create bool) bool {
 		events |= c.Int(libuv.WRITABLE)
 	}
 
-	fmt.Printf("Starting poll with events: %d\n", events)
+	fmt.Printf("[debug] Starting poll with events: %d\n", events)
 	r := conn.pollHandle.Start(events, onPoll)
 	if r < 0 {
 		fmt.Fprintf(os.Stderr, "uv_poll_start error: %s\n", libuv.Strerror(libuv.Errno(r)))
@@ -624,7 +645,7 @@ func createConnData() (*conn, error) {
 func freeConnData(userdata c.Pointer) {
 	conn := (*conn)(userdata)
 	if conn != nil && !conn.isClosing.Swap(true) {
-		fmt.Printf("Closing connection...\n")
+		fmt.Printf("[debug] Closing connection...\n")
 		if conn.readWaker != nil {
 			conn.readWaker.Free()
 			conn.readWaker = nil

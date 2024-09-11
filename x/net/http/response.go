@@ -5,18 +5,20 @@ import (
 	"unsafe"
 
 	"github.com/goplus/llgo/c"
+	"github.com/goplus/llgo/c/libuv"
 	"github.com/goplus/llgo/c/os"
 	"github.com/goplus/llgo/rust/hyper"
 )
 
 type response struct {
-	header     Header
-	statusCode int
-	written    bool
-	body       []byte
-	channel    *hyper.ResponseChannel
-	resp       *hyper.Response
-	request    *Request
+	header       Header
+	statusCode   int
+	written      bool
+	body         []byte
+	hyperChannel *hyper.ResponseChannel
+	hyperResp    *hyper.Response
+	request      *Request
+	asyncHandler *libuv.Async
 }
 
 type body struct {
@@ -26,9 +28,9 @@ type body struct {
 }
 
 type taskData struct {
-	hyperBody *hyper.Body
-	body *body
-	conn *conn
+	hyperBody   *hyper.Body
+	body        *body
+	conn        *conn
 	hyperTaskID hyperTaskID
 }
 
@@ -41,15 +43,18 @@ const (
 
 var DefaultChunkSize uintptr = 8192
 
-func newResponse(request *Request, channel *hyper.ResponseChannel) *response {
-	fmt.Printf("newResponse called\n")
-	resp := response{
-		header:  make(Header),
-		channel: channel,
-		request: request,
-		resp: hyper.NewResponse(),
+func newResponse(request *Request, hyperChannel *hyper.ResponseChannel) *response {
+	fmt.Printf("[debug] newResponse called\n")
+
+	return &response{
+		header:       make(Header),
+		hyperChannel: hyperChannel,
+		//request:      request,
+		statusCode:   200,
+		written:      false,
+		body:         nil,
+		hyperResp:    hyper.NewResponse(),
 	}
-	return &resp
 }
 
 func (r *response) Header() Header {
@@ -60,21 +65,33 @@ func (r *response) Write(data []byte) (int, error) {
 	if !r.written {
 		r.WriteHeader(200)
 	}
+	fmt.Printf("[debug] data: %s\n", string(data))
 	r.body = append(r.body, data...)
+	fmt.Printf("[debug] r.body: %s\n", string(r.body))
 	return len(data), nil
 }
 
 func (r *response) WriteHeader(statusCode int) {
-	fmt.Printf("WriteHeader called\n")
+	fmt.Println("[debug] WriteHeader called")
 	if r.written {
 		return
 	}
 	r.written = true
 	r.statusCode = statusCode
 
-	r.resp.SetStatus(uint16(statusCode))
+	r.hyperResp.SetStatus(uint16(statusCode))
 
-	headers := r.resp.Headers()
+	fmt.Println("[debug] WriteHeaderStatusCode done")
+
+	//debug
+	// fmt.Printf("[debug] < HTTP/1.1 %d\n", statusCode)
+	// for key, values := range r.header {
+	// 	for _, value := range values {
+	// 		fmt.Printf("< %s: %s\n", key, value)
+	// 	}
+	// }
+
+	headers := r.hyperResp.Headers()
 	for key, values := range r.header {
 		valueLen := len(values)
 		if valueLen > 1 {
@@ -92,25 +109,27 @@ func (r *response) WriteHeader(statusCode int) {
 		}
 	}
 
-	//debug
-	fmt.Printf("< HTTP/1.1 %d\n", statusCode)
-	for key, values := range r.header {
-		for _, value := range values {
-			fmt.Printf("< %s: %s\n", key, value)
-		}
-	}
+	fmt.Println("[debug] WriteHeaderHeaders done")
+
+	fmt.Println("[debug] WriteHeader done")
 }
 
 func (r *response) finalize() error {
-	fmt.Printf("finalize called\n")
-	err := r.request.Body.Close()
-	if err != nil {
-		return err
-	}
-	fmt.Printf("request body closed\n")
+	fmt.Printf("[debug] finalize called\n")
+	// err := r.request.Body.Close()
+	// if err != nil {
+	// 	return err
+	// }
+	// fmt.Printf("[debug] request body closed\n")
 
 	if !r.written {
 		r.WriteHeader(200)
+	}
+
+	r.hyperResp = hyper.NewResponse()
+
+	if r.hyperResp == nil {
+		return fmt.Errorf("failed to create response")
 	}
 
 	bodyData := body{
@@ -118,45 +137,48 @@ func (r *response) finalize() error {
 		len:     uintptr(len(r.body)),
 		readLen: 0,
 	}
-	fmt.Printf("bodyData constructed\n")
+	fmt.Println("[debug] bodyData constructed")
 
 	body := hyper.NewBody()
 	if body == nil {
 		return fmt.Errorf("failed to create body")
 	}
 	taskData := &taskData{
-		hyperBody: nil,
-		body: &bodyData,
-		conn: nil,
+		hyperBody:   nil,
+		body:        &bodyData,
+		conn:        nil,
 		hyperTaskID: taskSetBody,
 	}
 	body.SetDataFunc(setBodyDataFunc)
 	body.SetUserdata(unsafe.Pointer(taskData), nil)
-	fmt.Printf("bodyData userdata set\n")
+	fmt.Println("[debug] bodyData userdata set")
 
-	fmt.Printf("bodyData set\n")
+	fmt.Println("[debug] bodyData set")
 
-	resBody := r.resp.SetBody(body)
+	resBody := r.hyperResp.SetBody(body)
 	if resBody != hyper.OK {
 		return fmt.Errorf("failed to set body")
 	}
-	fmt.Printf("body set\n")
+	fmt.Println("[debug] body set")
 
-	r.channel.Send(r.resp)
-	fmt.Println("response sent")
+	r.hyperChannel.Send(r.hyperResp)
+	fmt.Println("[debug] response sent")
 	return nil
 }
 
 func setBodyDataFunc(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
-	fmt.Printf("setBodyDataFunc called\n")
+	fmt.Println("[debug] setBodyDataFunc called")
 	taskData := (*taskData)(userdata)
+	if taskData == nil {
+		fmt.Println("[debug] taskData is nil")
+		return hyper.PollError
+	}
 	body := taskData.body
 
 	if body.len > 0 {
 		//debug
-		fmt.Println("<")
-		fmt.Printf("%s", string(body.data))
-		fmt.Println("")
+		fmt.Println("[debug]<")
+		fmt.Printf("[debug]%s\n", string(body.data))
 
 		if body.len > DefaultChunkSize {
 			*chunk = hyper.CopyBuf(&body.data[body.readLen], DefaultChunkSize)
@@ -167,13 +189,15 @@ func setBodyDataFunc(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) 
 			body.readLen += body.len
 			body.len = 0
 		}
+		fmt.Println("[debug] setBodyDataFunc done")
 		return hyper.PollReady
 	}
 	if body.len == 0 {
 		*chunk = nil
+		fmt.Println("[debug] setBodyDataFunc done")
 		return hyper.PollReady
 	}
 
-	fmt.Printf("error setting body data: %s\n", c.GoString(c.Strerror(os.Errno)))
+	fmt.Printf("[debug] error setting body data: %s\n", c.GoString(c.Strerror(os.Errno)))
 	return hyper.PollError
 }
