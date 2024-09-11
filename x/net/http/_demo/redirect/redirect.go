@@ -16,7 +16,11 @@ func main() {
 	defer resp.Body.Close()
 	fmt.Println(resp.Status, "read bytes: ", resp.ContentLength)
 	fmt.Println(resp.Proto)
-	resp.PrintHeaders()
+	for key, values := range resp.Header {
+		for _, value := range values {
+			fmt.Printf("%s: %s\n", key, value)
+		}
+	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Println(err)

@@ -75,15 +75,6 @@ func (h Header) Del(key string) {
 	textproto.MIMEHeader(h).Del(key)
 }
 
-// CanonicalHeaderKey returns the canonical format of the
-// header key s. The canonicalization converts the first
-// letter and any letter following a hyphen to upper case;
-// the rest are converted to lowercase. For example, the
-// canonical key for "accept-encoding" is "Accept-Encoding".
-// If s contains a space or invalid header field bytes, it is
-// returned without modifications.
-func CanonicalHeaderKey(s string) string { return textproto.CanonicalMIMEHeaderKey(s) }
-
 // Clone returns a copy of h or nil if h is nil.
 func (h Header) Clone() Header {
 	if h == nil {
@@ -109,28 +100,6 @@ func (h Header) Clone() Header {
 		sv = sv[n:]
 	}
 	return h2
-}
-
-var headerNewlineToSpace = strings.NewReplacer("\n", " ", "\r", " ")
-
-type keyValues struct {
-	key    string
-	values []string
-}
-
-// A headerSorter implements sort.Interface by sorting a []keyValues
-// by key. It's used as a pointer, so it can fit in a sort.Interface
-// interface value without allocation.
-type headerSorter struct {
-	kvs []keyValues
-}
-
-func (s *headerSorter) Len() int           { return len(s.kvs) }
-func (s *headerSorter) Swap(i, j int)      { s.kvs[i], s.kvs[j] = s.kvs[j], s.kvs[i] }
-func (s *headerSorter) Less(i, j int) bool { return s.kvs[i].key < s.kvs[j].key }
-
-var headerSorterPool = sync.Pool{
-	New: func() any { return new(headerSorter) },
 }
 
 // sortedKeyValues returns h's keys sorted in the returned kvs
@@ -199,6 +168,37 @@ func (h Header) writeSubset(reqHeaders *hyper.Headers, exclude map[string]bool) 
 	return nil
 }
 
+var headerNewlineToSpace = strings.NewReplacer("\n", " ", "\r", " ")
+
+type keyValues struct {
+	key    string
+	values []string
+}
+
+// A headerSorter implements sort.Interface by sorting a []keyValues
+// by key. It's used as a pointer, so it can fit in a sort.Interface
+// interface value without allocation.
+type headerSorter struct {
+	kvs []keyValues
+}
+
+func (s *headerSorter) Len() int           { return len(s.kvs) }
+func (s *headerSorter) Swap(i, j int)      { s.kvs[i], s.kvs[j] = s.kvs[j], s.kvs[i] }
+func (s *headerSorter) Less(i, j int) bool { return s.kvs[i].key < s.kvs[j].key }
+
+var headerSorterPool = sync.Pool{
+	New: func() any { return new(headerSorter) },
+}
+
+// CanonicalHeaderKey returns the canonical format of the
+// header key s. The canonicalization converts the first
+// letter and any letter following a hyphen to upper case;
+// the rest are converted to lowercase. For example, the
+// canonical key for "accept-encoding" is "Accept-Encoding".
+// If s contains a space or invalid header field bytes, it is
+// returned without modifications.
+func CanonicalHeaderKey(s string) string { return textproto.CanonicalMIMEHeaderKey(s) }
+
 // hasToken reports whether token appears with v, ASCII
 // case-insensitive, with space or comma boundaries.
 // token must be all lowercase.
@@ -250,12 +250,4 @@ func appendToResponseHeader(userdata c.Pointer, name *uint8, nameLen uintptr, va
 	}
 	resp.Header.Add(nameStr, valueStr)
 	return hyper.IterContinue
-}
-
-func (resp *Response) PrintHeaders() {
-	for key, values := range resp.Header {
-		for _, value := range values {
-			fmt.Printf("%s: %s\n", key, value)
-		}
-	}
 }

@@ -294,7 +294,7 @@ func (r *Request) write(client *hyper.ClientConn, taskData *taskData, exec *hype
 	//}
 
 	// Prepare the hyper.Request
-	hyperReq, err := r.newHyperRequest(taskData.pc.isProxy, taskData.req.extra)
+	hyperReq, err := r.newHyperRequest(taskData.pc.isProxy, taskData.req.extra, taskData.req)
 	if err != nil {
 		return err
 	}
@@ -308,7 +308,7 @@ func (r *Request) write(client *hyper.ClientConn, taskData *taskData, exec *hype
 	return err
 }
 
-func (r *Request) newHyperRequest(usingProxy bool, extraHeader Header) (*hyper.Request, error) {
+func (r *Request) newHyperRequest(usingProxy bool, extraHeader Header, treq *transportRequest) (*hyper.Request, error) {
 	// Find the target host. Prefer the Host: header, but if that
 	// is not given, use the host from the request URL.
 	//
@@ -401,11 +401,6 @@ func (r *Request) newHyperRequest(usingProxy bool, extraHeader Header) (*hyper.R
 	}
 
 	// Process Body,ContentLength,Close,Trailer
-	//tw, err := newTransferWriter(r)
-	//if err != nil {
-	//	return err
-	//}
-	//err = tw.writeHeader(w, trace)
 	err = r.writeHeader(reqHeaders)
 	if err != nil {
 		return nil, err
@@ -433,7 +428,7 @@ func (r *Request) newHyperRequest(usingProxy bool, extraHeader Header) (*hyper.R
 	}
 
 	// Write body and trailer
-	err = r.writeBody(hyperReq)
+	err = r.writeBody(hyperReq, treq)
 	if err != nil {
 		return nil, err
 	}

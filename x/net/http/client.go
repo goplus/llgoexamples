@@ -307,7 +307,7 @@ func send(ireq *Request, rt RoundTripper, deadline time.Time) (resp *Response, d
 		forkReq()
 	}
 
-	// TODO(spongehah) timeout(send)
+	// TODO(spongehah) tmp timeout(send)
 	//stopTimer, didTimeout := setRequestCancel(req, rt, deadline)
 	req.timeoutch = make(chan struct{}, 1)
 	req.deadline = deadline
@@ -490,7 +490,6 @@ func knownRoundTripperImpl(rt RoundTripper, req *Request) bool {
 			return knownRoundTripperImpl(altRT, req)
 		}
 		return true
-		// TODO(spongehah) http2
 		//case *http2Transport, http2noDialH2RoundTripper:
 		//	return true
 	}

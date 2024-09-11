@@ -98,7 +98,7 @@ func (uste *unsupportedTEError) Error() string {
 }
 
 // msg is *Request or *Response.
-func readTransfer(msg any, r *io.PipeReader) (err error) {
+func readTransfer(msg any, r io.ReadCloser) (err error) {
 	t := &transferReader{RequestMethod: "GET"}
 
 	// Unify input
@@ -173,19 +173,17 @@ func readTransfer(msg any, r *io.PipeReader) (err error) {
 		if isResponse && noResponseBodyExpected(t.RequestMethod) || !bodyAllowedForStatus(t.StatusCode) {
 			t.Body = NoBody
 		} else {
-			// TODO(spongehah) ChunkReader(readTransfer)
-			//t.Body = &body{src: internal.NewChunkedReader(r), hdr: msg, r: r, closing: t.Close}
-			t.Body = &body{src: r, hdr: msg, r: r, closing: t.Close}
+			t.Body = &body{src: r, closer: r, hdr: msg, r: r, closing: t.Close}
 		}
 	case realLength == 0:
 		t.Body = NoBody
 	case realLength > 0:
-		t.Body = &body{src: io.LimitReader(r, realLength), closing: t.Close}
+		t.Body = &body{src: io.LimitReader(r, realLength), closer: r, closing: t.Close}
 	default:
 		// realLength < 0, i.e. "Content-Length" not mentioned in header
 		if t.Close {
 			// Close semantics (i.e. HTTP/1.0)
-			t.Body = &body{src: r, closing: t.Close}
+			t.Body = &body{src: r, closer: r, closing: t.Close}
 		} else {
 			// Persistent connection (i.e. HTTP/1.1)
 			t.Body = NoBody
@@ -349,9 +347,9 @@ func fixTrailer(header Header, chunked bool) (Header, error) {
 // Close ensures that the body has been fully read
 // and then reads the trailer if necessary.
 type body struct {
-	src io.Reader
-	hdr any // non-nil (Response or Request) value means read trailer
-	//r            *bufio.Reader // underlying wire-format reader for the trailer
+	src          io.Reader
+	closer       io.Closer
+	hdr          any       // non-nil (Response or Request) value means read trailer
 	r            io.Reader // underlying wire-format reader for the trailer
 	closing      bool      // is the connection to be closed after reading body?
 	doEarlyClose bool      // whether Close should stop early
@@ -476,6 +474,15 @@ func (b *body) Close() error {
 		_, err = io.Copy(io.Discard, bodyLocked{b})
 	}
 	b.closed = true
+
+	// Close bodyChunk
+	if b.closer != nil {
+		closeErr := b.closer.Close()
+		if err == nil {
+			err = closeErr
+		}
+	}
+
 	return err
 }
 
@@ -654,26 +661,26 @@ func unwrapNopCloser(r io.Reader) (underlyingReader io.Reader, isNopCloser bool)
 // files (*os.File types) are properly optimized.
 //
 // This function is only intended for use in writeBody.
-func (req *Request) unwrapBody() io.Reader {
-	if r, ok := unwrapNopCloser(req.Body); ok {
+func (r *Request) unwrapBody() io.Reader {
+	if r, ok := unwrapNopCloser(r.Body); ok {
 		return r
 	}
-	if r, ok := req.Body.(*readTrackingBody); ok {
+	if r, ok := r.Body.(*readTrackingBody); ok {
 		r.didRead = true
 		return r.ReadCloser
 	}
-	return req.Body
+	return r.Body
 }
 
-func (r *Request) writeBody(hyperReq *hyper.Request) error {
+func (r *Request) writeBody(hyperReq *hyper.Request, treq *transportRequest) error {
 	if r.Body != nil {
 		var body = r.unwrapBody()
 		hyperReqBody := hyper.NewBody()
 		buf := make([]byte, defaultChunkSize)
 		reqData := &bodyReq{
-			body:      body,
-			buf:       buf,
-			closeBody: r.closeBody,
+			body: body,
+			buf:  buf,
+			treq: treq,
 		}
 		hyperReqBody.SetUserdata(c.Pointer(reqData))
 		hyperReqBody.SetDataFunc(setPostData)
@@ -683,9 +690,9 @@ func (r *Request) writeBody(hyperReq *hyper.Request) error {
 }
 
 type bodyReq struct {
-	body      io.Reader
-	buf       []byte
-	closeBody func() error
+	body io.Reader
+	buf  []byte
+	treq *transportRequest
 }
 
 func setPostData(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.Int {
@@ -694,10 +701,11 @@ func setPostData(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.In
 	if err != nil {
 		if err == io.EOF {
 			*chunk = nil
-			req.closeBody()
+			req.treq.closeBody()
 			return hyper.PollReady
 		}
 		fmt.Println("error reading request body: ", err)
+		req.treq.setError(requestBodyReadError{err})
 		return hyper.PollError
 	}
 	if n > 0 {
@@ -706,10 +714,11 @@ func setPostData(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) c.In
 	}
 	if n == 0 {
 		*chunk = nil
-		req.closeBody()
+		req.treq.closeBody()
 		return hyper.PollReady
 	}
-	req.closeBody()
-	fmt.Printf("error reading request body: %s\n", c.GoString(c.Strerror(os.Errno)))
+	req.treq.closeBody()
+	err = fmt.Errorf("error reading request body: %s\n", c.GoString(c.Strerror(os.Errno)))
+	req.treq.setError(requestBodyReadError{err})
 	return hyper.PollError
 }

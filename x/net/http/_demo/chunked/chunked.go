@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	resp, err := http.Get("https://www.baidu.com")
+	resp, err := http.Get("http://localhost:8080/chunked")
 	if err != nil {
 		fmt.Println(err)
 		return
