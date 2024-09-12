@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sync"
 
 	"github.com/goplus/llgo/c/libuv"
 )
@@ -14,7 +13,6 @@ type requestBody struct {
 	readCh      chan []byte
 	asyncHandle *libuv.Async
 
-	once sync.Once
 	done chan struct{}
 
 	rerr error
