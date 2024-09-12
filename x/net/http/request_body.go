@@ -9,26 +9,6 @@ import (
 	"github.com/goplus/llgo/c/libuv"
 )
 
-type onceError struct {
-	sync.Mutex
-	err error
-}
-
-func (a *onceError) Store(err error) {
-	a.Lock()
-	defer a.Unlock()
-	if a.err != nil {
-		return
-	}
-	a.err = err
-}
-
-func (a *onceError) Load() error {
-	a.Lock()
-	defer a.Unlock()
-	return a.err
-}
-
 type requestBody struct {
 	chunk       []byte
 	readCh      chan []byte
@@ -37,7 +17,7 @@ type requestBody struct {
 	once sync.Once
 	done chan struct{}
 
-	rerr onceError
+	rerr error
 }
 
 var (
@@ -83,7 +63,7 @@ func (rb *requestBody) Read(p []byte) (n int, err error) {
 }
 
 func (rb *requestBody) readCloseError() error {
-	if rerr := rb.rerr.Load(); rerr != nil {
+	if rerr := rb.rerr; rerr != nil {
 		return rerr
 	}
 	return ErrClosedRequestBody
@@ -94,11 +74,8 @@ func (rb *requestBody) closeRead(err error) error {
 	if err == nil {
 		err = io.EOF
 	}
-	rb.rerr.Store(err)
-	rb.once.Do(func() {
-		close(rb.done)
-	})
-	//close(rb.done)
+	rb.rerr = err
+	close(rb.done)
 	return nil
 }
 
