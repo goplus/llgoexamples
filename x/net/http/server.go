@@ -188,7 +188,7 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 
 		(*libuv.Handle)(unsafe.Pointer(&conn.pollHandle)).Data = unsafe.Pointer(conn)
 
-		if !updateConnRegistrations(conn, true) {
+		if !updateConnRegistrations(conn) {
 			(*libuv.Handle)(unsafe.Pointer(&conn.pollHandle)).Close(nil)
 			(*libuv.Handle)(unsafe.Pointer(&conn.stream)).Close(nil)
 			return
@@ -484,7 +484,7 @@ func readCb(userdata unsafe.Pointer, ctx *hyper.Context, buf *byte, bufLen uintp
 	if conn.eventMask&c.Uint(libuv.READABLE) == 0 {
 		conn.eventMask |= c.Uint(libuv.READABLE)
 		fmt.Printf("[debug] ReadCb Event mask: %d\n", conn.eventMask)
-		if !updateConnRegistrations(conn, false) {
+		if !updateConnRegistrations(conn) {
 			return hyper.IoError
 		}
 		fmt.Printf("[debug] ReadCb updateConnRegistrations\n")
@@ -513,7 +513,7 @@ func writeCb(userdata unsafe.Pointer, ctx *hyper.Context, buf *byte, bufLen uint
 	if conn.eventMask&c.Uint(libuv.WRITABLE) == 0 {
 		conn.eventMask |= c.Uint(libuv.WRITABLE)
 		fmt.Printf("[debug] WriteCb Event mask: %d\n", conn.eventMask)
-		if !updateConnRegistrations(conn, false) {
+		if !updateConnRegistrations(conn) {
 			return hyper.IoError
 		}
 	}
@@ -542,7 +542,7 @@ func onPoll(handle *libuv.Poll, status c.Int, events c.Int) {
 	}
 }
 
-func updateConnRegistrations(conn *conn, create bool) bool {
+func updateConnRegistrations(conn *conn) bool {
 	fmt.Println("[debug] updateConnRegistrations called")
 
 	events := c.Int(0)
