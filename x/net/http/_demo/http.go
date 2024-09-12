@@ -17,8 +17,6 @@ func echoHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	fmt.Printf(">> URL: %s\n", r.URL.String())
 	fmt.Printf(">> RemoteAddr: %s\n", r.RemoteAddr)
-	// fmt.Println("ContentLength: %d", r.ContentLength)
-	// fmt.Println("TransferEncoding: %s", r.TransferEncoding)
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -26,23 +24,8 @@ func echoHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
-
-	// var body []byte
-	// buffer := make([]byte, 1024)
-	// for {
-	// 	n, err := r.Body.Read(buffer)
-	// 	if err != nil && err != io.EOF {
-	// 		http.Error(w, "Error reading request body", http.StatusInternalServerError)
-	// 		return
-	// 	}
-	// 	body = append(body, buffer[:n]...)
-	// 	if err == io.EOF {
-	// 		break
-	// 	}
-	// }
-
 	fmt.Printf(">> Body: %s\n", string(body))
-	fmt.Println("[debug] body read done")
+
 	w.Header().Set("Content-Type", "text/plain")
 	w.Write(body)
 }
