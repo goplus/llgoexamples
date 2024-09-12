@@ -14,6 +14,7 @@ type response struct {
 	statusCode   int
 	written      bool
 	body         []byte
+	server       *Server
 	hyperChannel *hyper.ResponseChannel
 	hyperResp    *hyper.Response
 }
@@ -27,7 +28,8 @@ type responseBodyRaw struct {
 type taskData struct {
 	hyperBody    *hyper.Body
 	responseBody *responseBodyRaw
-	conn         *conn
+	requestBody  *requestBody
+	server       *Server
 	taskFlag     taskFlag
 }
 
@@ -40,12 +42,13 @@ const (
 
 var DefaultChunkSize uintptr = 8192
 
-func newResponse(hyperChannel *hyper.ResponseChannel) *response {
+func newResponse(server *Server, hyperChannel *hyper.ResponseChannel) *response {
 	fmt.Printf("[debug] newResponse called\n")
 
 	return &response{
 		header:       make(Header),
 		hyperChannel: hyperChannel,
+		server:       server,
 		statusCode:   200,
 		written:      false,
 		body:         nil,
@@ -133,7 +136,7 @@ func (r *response) finalize() error {
 	taskData := &taskData{
 		hyperBody:    nil,
 		responseBody: &bodyData,
-		conn:         nil,
+		server:       r.server,
 		taskFlag:     setBodyTask,
 	}
 	body.SetDataFunc(setBodyDataFunc)

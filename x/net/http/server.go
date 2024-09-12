@@ -37,6 +37,8 @@ type Server struct {
 	inShutdown atomic.Bool
 	idleHandle libuv.Idle
 
+	executor *hyper.Executor
+
 	mu                sync.Mutex
 	activeConnections map[*conn]struct{}
 }
@@ -51,9 +53,7 @@ type conn struct {
 	http2Opts     *hyper.Http2ServerconnOptions
 	isClosing     atomic.Bool
 	closedHandles int32
-	executor      *hyper.Executor
 	remoteAddr    string
-	requestBody   *requestBody
 	asyncHandle   *libuv.Async
 }
 
@@ -225,7 +225,7 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 			(*libuv.Handle)(unsafe.Pointer(&conn.stream)).Close(nil)
 			return
 		}
-		conn.executor = executor
+		srv.executor = executor
 
 		fmt.Println("[debug] Conn created")
 		srv.trackConn(conn, true)
@@ -236,7 +236,7 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 		io := createIo(conn)
 		service := hyper.ServiceNew(serverCallback)
 		service.SetUserdata(unsafe.Pointer(userdata), nil)
-		http1Opts := hyper.Http1ServerconnOptionsNew(conn.executor)
+		http1Opts := hyper.Http1ServerconnOptionsNew(srv.executor)
 		if http1Opts == nil {
 			fmt.Fprintf(os.Stderr, "Failed to create http1_opts\n")
 			os.Exit(1)
@@ -248,7 +248,7 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 		}
 		conn.http1Opts = http1Opts
 
-		http2Opts := hyper.Http2ServerconnOptionsNew(conn.executor)
+		http2Opts := hyper.Http2ServerconnOptionsNew(srv.executor)
 		if http2Opts == nil {
 			fmt.Fprintf(os.Stderr, "Failed to create http2_opts\n")
 			os.Exit(1)
@@ -266,7 +266,7 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 		conn.http2Opts = http2Opts
 
 		serverconn := hyper.ServeHttpXConnection(http1Opts, http2Opts, io, service)
-		conn.executor.Push(serverconn)
+		srv.executor.Push(serverconn)
 	} else {
 		fmt.Println("[debug] Client not accepted")
 		(*libuv.Handle)(unsafe.Pointer(&conn.pollHandle)).Close(nil)
@@ -280,7 +280,7 @@ func onAsync(asyncHandle *libuv.Async) {
 	dataTask := taskData.hyperBody.Data()
 	dataTask.SetUserdata(c.Pointer(taskData), nil)
 	if dataTask != nil {
-		r := taskData.conn.executor.Push(dataTask)
+		r := taskData.server.executor.Push(dataTask)
 		fmt.Printf("[debug] onAsync push data task: %d\n", r)
 		if r != hyper.OK {
 			fmt.Printf("failed to push data task: %d\n", r)
@@ -291,13 +291,11 @@ func onAsync(asyncHandle *libuv.Async) {
 
 func onIdle(handle *libuv.Idle) {
 	srv := (*Server)((*libuv.Handle)(unsafe.Pointer(handle)).GetData())
-	for conn := range srv.activeConnections {
-		if conn.executor != nil {
-			task := conn.executor.Poll()
-			for task != nil {
-				srv.handleTask(task)
-				task = conn.executor.Poll()
-			}
+	if srv.executor != nil {
+		task := srv.executor.Poll()
+		for task != nil {
+			srv.handleTask(task)
+			task = srv.executor.Poll()
 		}
 	}
 
@@ -309,19 +307,24 @@ func onIdle(handle *libuv.Idle) {
 
 func serverCallback(userdata unsafe.Pointer, hyperReq *hyper.Request, channel *hyper.ResponseChannel) {
 	userData := (*serviceUserdata)(userdata)
+	srv := userData.server
+	if srv == nil {
+		fmt.Fprintf(os.Stderr, "Error: Received null server\n")
+		return
+	}
 
 	if hyperReq == nil {
 		fmt.Fprintf(os.Stderr, "Error: Received null request\n")
 		return
 	}
 
-	req, err := userData.conn.readRequest(hyperReq)
+	req, err := userData.conn.readRequest(srv, hyperReq)
 	if err != nil {
 		fmt.Printf("Error creating request: %v\n", err)
 		return
 	}
 
-	res := newResponse(channel)
+	res := newResponse(srv, channel)
 	fmt.Println("[debug] Response created")
 
 	//TODO(hackerchai): replace with no goroutine
@@ -348,7 +351,7 @@ func (srv *Server) handleTask(task *hyper.Task) {
 	if payload != nil {
 		switch payload.taskFlag {
 		case getBodyTask:
-			handleGetBodyTask(hyperTaskType, task, payload)
+			handleGetBodyTask(srv, hyperTaskType, task, payload)
 			return
 		case setBodyTask:
 			handleSetBodyTask(hyperTaskType, task)
@@ -374,7 +377,7 @@ func (srv *Server) handleTask(task *hyper.Task) {
 	}
 }
 
-func handleGetBodyTask(hyperTaskType hyper.TaskReturnType, task *hyper.Task, payload *taskData) {
+func handleGetBodyTask(srv *Server, hyperTaskType hyper.TaskReturnType, task *hyper.Task, payload *taskData) {
 	switch hyperTaskType {
 	case hyper.TaskError:
 		handleTaskError(task)
@@ -382,7 +385,7 @@ func handleGetBodyTask(hyperTaskType hyper.TaskReturnType, task *hyper.Task, pay
 		handleTaskBuffer(task, payload)
 	case hyper.TaskEmpty:
 		fmt.Println("[debug] Get body task closing request body")
-		payload.conn.requestBody.Close()
+		payload.requestBody.Close()
 		task.Free()
 	}
 }
@@ -411,7 +414,7 @@ func handleTaskError(task *hyper.Task) {
 func handleTaskBuffer(task *hyper.Task, payload *taskData) {
 	buf := (*hyper.Buf)(task.Value())
 	bytes := unsafe.Slice(buf.Bytes(), buf.Len())
-	payload.conn.requestBody.readCh <- bytes
+	payload.requestBody.readCh <- bytes
 	fmt.Printf("[debug] Task get body writing to bodyWriter: %s\n", string(bytes))
 	buf.Free()
 	task.Free()
@@ -591,11 +594,6 @@ func freeConnData(userdata c.Pointer) {
 			conn.writeWaker = nil
 		}
 
-		if conn.executor != nil {
-			conn.executor.Free()
-			conn.executor = nil
-		}
-
 		if conn.http1Opts != nil {
 			conn.http1Opts.Free()
 			conn.http1Opts = nil
@@ -632,6 +630,11 @@ func (srv *Server) Close() error {
 		delete(srv.activeConnections, c)
 	}
 
+	if srv.executor != nil {
+		srv.executor.Free()
+		srv.executor = nil
+	}
+
 	srv.uvLoop.Walk(closeWalkCb, nil)
 	srv.uvLoop.Run(libuv.RUN_ONCE)
 	(*libuv.Handle)(unsafe.Pointer(&srv.uvServer)).Close(nil)
@@ -663,10 +666,6 @@ func (c *conn) Close() {
 		c.writeWaker = nil
 	}
 
-	if c.executor != nil {
-		c.executor.Free()
-		c.executor = nil
-	}
 	if c.http1Opts != nil {
 		c.http1Opts.Free()
 		c.http1Opts = nil
