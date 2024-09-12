@@ -136,12 +136,12 @@ func (conn *conn) readRequest(hyperReq *hyper.Request) (*Request, error) {
 	body := hyperReq.Body()
 	if body != nil {
 		task := body.Data()
-		taskID := taskGetBody
+		taskFlag := getBodyTask
 		taskData := taskData{
-			hyperBody:   body,
-			body:        nil,
-			conn:        conn,
-			hyperTaskID: taskID,
+			hyperBody:    body,
+			responseBody: nil,
+			conn:         conn,
+			taskFlag:     taskFlag,
 		}
 		task.SetUserdata(c.Pointer(&taskData), nil)
 		requestBody := newRequestBody(conn.asyncHandle)

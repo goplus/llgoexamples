@@ -35,7 +35,6 @@ type Server struct {
 	uvLoop     *libuv.Loop
 	uvServer   libuv.Tcp
 	inShutdown atomic.Bool
-	//checkHandle libuv.Check
 	idleHandle libuv.Idle
 
 	mu                sync.Mutex
@@ -123,18 +122,6 @@ func (srv *Server) ListenAndServe() error {
 	if err := (*libuv.Stream)(&srv.uvServer).Listen(128, onNewConnection); err != 0 {
 		return fmt.Errorf("failed to listen: %v", err)
 	}
-
-	// if r := libuv.InitCheck(srv.uvLoop, &srv.checkHandle); r != 0 {
-	// 	fmt.Fprintf(os.Stderr, "Failed to initialize check handler: %d\n", r)
-	// 	os.Exit(1)
-	// }
-
-	// (*libuv.Handle)(unsafe.Pointer(&srv.checkHandle)).SetData(unsafe.Pointer(srv))
-
-	// if r := srv.checkHandle.Start(onCheck); r != 0 {
-	// 	fmt.Fprintf(os.Stderr, "Failed to start check handler: %d\n", r)
-	// 	os.Exit(1)
-	// }
 
 	if r := libuv.InitIdle(srv.uvLoop, &srv.idleHandle); r != 0 {
 		fmt.Fprintf(os.Stderr, "Failed to initialize idle handler: %d\n", r)
@@ -302,34 +289,13 @@ func onAsync(asyncHandle *libuv.Async) {
 	}
 }
 
-// func onCheck(handle *libuv.Check) {
-// 	//fmt.Println("onCheck called")
-// 	srv := (*Server)((*libuv.Handle)(unsafe.Pointer(handle)).GetData())
-// 	for conn := range srv.activeConnections {
-// 		if conn.executor != nil {
-// 			task := conn.executor.Poll()
-// 			for task != nil {
-// 				srv.handleTask(task)
-// 				task = conn.executor.Poll()
-// 			}
-// 		}
-// 	}
-
-// 	if srv.shuttingDown() {
-// 		fmt.Println("Shutdown initiated, cleaning up...")
-// 		handle.Stop()
-// 	}
-// }
-
 func onIdle(handle *libuv.Idle) {
-	//fmt.Println("onIdle called")
 	srv := (*Server)((*libuv.Handle)(unsafe.Pointer(handle)).GetData())
 	for conn := range srv.activeConnections {
 		if conn.executor != nil {
 			task := conn.executor.Poll()
 			for task != nil {
 				srv.handleTask(task)
-				//srv.handleRead(conn, task)
 				task = conn.executor.Poll()
 			}
 		}
@@ -355,148 +321,118 @@ func serverCallback(userdata unsafe.Pointer, hyperReq *hyper.Request, channel *h
 		return
 	}
 
-	res := newResponse(req, channel)
+	res := newResponse(channel)
 	fmt.Println("[debug] Response created")
 
+	//TODO(hackerchai): replace with no goroutine
+	// userData.server.Handler.ServeHTTP(res, req)
+	// res.finalize()
 	go func() {
 		userData.server.Handler.ServeHTTP(res, req)
 		res.finalize()
 	}()
-
-	// userData.server.Handler.ServeHTTP(res, req)
-
-	// res.finalize()
 }
 
-// func (srv *Server) handleRead(conn *conn, task *hyper.Task) {
-// 	payload := (*taskData)(task.Userdata())
-// 	if payload == nil {
-// 		fmt.Println("taskData is nil, no need to handle read")
-// 		return
-// 	}
-
-// 	select {
-// 	case <-conn.requestBody.readyCh:
-// 		fmt.Println("readyCh signaled")
-
-// 		fmt.Println("taskGetBody get body task form readyCh")
-// 		getBodyTask := payload.hyperBody.Data()
-// 		getBodyTask.SetUserdata(c.Pointer(payload), nil)
-// 		if getBodyTask != nil {
-// 			fmt.Println("taskGetBody push get body task")
-// 			r := payload.conn.executor.Push(getBodyTask)
-// 			fmt.Printf("taskGetBody push get body task: %d\n", r)
-// 			if r != hyper.OK {
-// 				fmt.Printf("failed to push get body task: %d\n", r)
-// 				getBodyTask.Free()
-// 			}
-// 		}
-// 	default:
-// 		fmt.Println("readToReadCh not signaled")
-// 	}
-// }
-
 func (srv *Server) handleTask(task *hyper.Task) {
-	taskType := task.Type()
-	//debug
-	switch taskType {
-	case hyper.TaskEmpty:
-		fmt.Println("[debug] Task type: Empty")
-	case hyper.TaskBuf:
-		fmt.Println("[debug] Task type: Buffer")
-	case hyper.TaskError:
-		fmt.Println("[debug] Task type: Error")
-	case hyper.TaskServerconn:
-		fmt.Println("[debug] Task type: Serverconn")
-	default:
-		fmt.Println("[debug] Unknown task type")
-	}
+	hyperTaskType := task.Type()
+	// Debug
+	fmt.Printf("[debug] Task type: %s\n", getTaskTypeString(hyperTaskType))
 
 	payload := (*taskData)(task.Userdata())
+
+	// Debug
+	if payload == nil {
+		fmt.Println("[debug] task data is nil")
+	}
+
 	if payload != nil {
-		taskID := payload.hyperTaskID
-
-		// select {
-		// case <-conn.requestBody.readyCh:
-		// 	fmt.Println("readyCh recieved")
-
-		// 	fmt.Println("taskGetBody get body task form readyCh")
-		// 	getBodyTask := payload.hyperBody.Data()
-		// 	getBodyTask.SetUserdata(c.Pointer(payload), nil)
-		// 	if getBodyTask != nil {
-		// 		fmt.Println("taskGetBody push get body task")
-		// 		r := payload.conn.executor.Push(getBodyTask)
-		// 		fmt.Printf("taskGetBody push get body task: %d\n", r)
-		// 		if r != hyper.OK {
-		// 			fmt.Printf("failed to push get body task: %d\n", r)
-		// 			getBodyTask.Free()
-		// 		}
-		// 	}
-		// default:
-		// 	fmt.Println("readyCh not recieved")
-		// }
-
-		if taskID == taskGetBody {
-			fmt.Println("[debug] taskGetBody called")
-			if taskType == hyper.TaskError {
-				fmt.Println("[debug] taskGetBody error")
-				err := (*hyper.Error)(task.Value())
-				fmt.Printf("error code: %d\n", err.Code())
-
-				var errbuf [256]byte
-				errlen := err.Print(&errbuf[0], unsafe.Sizeof(errbuf))
-				fmt.Printf("details: %s\n", errbuf[:errlen])
-				err.Free()
-				task.Free()
-			}
-
-			if taskType == hyper.TaskBuf {
-				fmt.Println("[debug] taskGetBody write buf")
-				buf := (*hyper.Buf)(task.Value())
-				bytes := unsafe.Slice(buf.Bytes(), buf.Len())
-				fmt.Printf("[debug] taskGetBody writing to bodyWriter: %s\n", string(bytes))
-				buf.Free()
-				task.Free()
-				fmt.Println("[debug] taskGetBody free task")
-				payload.conn.requestBody.readCh <- bytes
-				fmt.Println("[debug] taskGetBody wrote to bodyWriter")
-			}
-
-			if taskType == hyper.TaskEmpty {
-				fmt.Println("[debug] taskGetBody close requestBody")
-				payload.conn.requestBody.Close()
-				fmt.Println("[debug] taskGetBody free task")
-				task.Free()
-			}
-		} else if taskID == taskSetBody {
-			fmt.Println("[debug] taskSetBody called")
-			if taskType == hyper.TaskError {
-				fmt.Println("[debug] taskSetBody error")
-				err := (*hyper.Error)(task.Value())
-				fmt.Printf("error code: %d\n", err.Code())
-
-				var errbuf [256]byte
-				errlen := err.Print(&errbuf[0], unsafe.Sizeof(errbuf))
-				fmt.Printf("details: %s\n", errbuf[:errlen])
-				err.Free()
-				task.Free()
-			}
-
-			if taskType == hyper.TaskEmpty {
-				fmt.Println("[debug] taskSetBody free task")
-				task.Free()
-			}
+		switch payload.taskFlag {
+		case getBodyTask:
+			handleGetBodyTask(hyperTaskType, task, payload)
+			return
+		case setBodyTask:
+			handleSetBodyTask(hyperTaskType, task)
+			return
+		default:
+			fmt.Println("[debug] Unknown response task type")
+			return
 		}
 	}
 
-	if taskType == hyper.TaskEmpty {
-		fmt.Println("[debug] taskEmpty called")
+	switch hyperTaskType {
+	case hyper.TaskError:
+		handleTaskError(task)
+		return
+	case hyper.TaskEmpty:
+		fmt.Println("[debug] Empty task handled")
+		task.Free()
+		return
+	case hyper.TaskServerconn:
+		fmt.Println("[debug] Server connection task handled")
+		task.Free()
+		return
+	}
+}
+
+func handleGetBodyTask(hyperTaskType hyper.TaskReturnType, task *hyper.Task, payload *taskData) {
+	switch hyperTaskType {
+	case hyper.TaskError:
+		handleTaskError(task)
+	case hyper.TaskBuf:
+		handleTaskBuffer(task, payload)
+	case hyper.TaskEmpty:
+		fmt.Println("[debug] Get body task closing request body")
+		payload.conn.requestBody.Close()
 		task.Free()
 	}
+}
 
-	if taskType == hyper.TaskServerconn {
-		fmt.Println("[debug] taskServerconn called")
+func handleSetBodyTask(hyperTaskType hyper.TaskReturnType, task *hyper.Task) {
+	switch hyperTaskType {
+	case hyper.TaskError:
+		handleTaskError(task)
+	case hyper.TaskEmpty:
+		fmt.Println("[debug] Set body task freeing")
 		task.Free()
+	}
+}
+
+func handleTaskError(task *hyper.Task) {
+	err := (*hyper.Error)(task.Value())
+	fmt.Printf("Error code: %d\n", err.Code())
+
+	var errbuf [256]byte
+	errlen := err.Print(&errbuf[0], unsafe.Sizeof(errbuf))
+	fmt.Printf("Details: %s\n", errbuf[:errlen])
+	err.Free()
+	task.Free()
+}
+
+func handleTaskBuffer(task *hyper.Task, payload *taskData) {
+	buf := (*hyper.Buf)(task.Value())
+	bytes := unsafe.Slice(buf.Bytes(), buf.Len())
+	payload.conn.requestBody.readCh <- bytes
+	fmt.Printf("[debug] Task get body writing to bodyWriter: %s\n", string(bytes))
+	buf.Free()
+	task.Free()
+}
+
+func getTaskTypeString(taskType hyper.TaskReturnType) string {
+	switch taskType {
+	case hyper.TaskEmpty:
+		return "Empty"
+	case hyper.TaskBuf:
+		return "Buffer"
+	case hyper.TaskError:
+		return "Error"
+	case hyper.TaskServerconn:
+		return "Server connection"
+	case hyper.TaskClientConn:
+		return "Client connection"
+	case hyper.TaskResponse:
+		return "Response"
+	default:
+		return "Unknown"
 	}
 }
 
