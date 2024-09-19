@@ -18,6 +18,14 @@ import (
 	"github.com/goplus/llgo/x/net"
 )
 
+// var requestNotifyHandle *libuv.Async
+const _SC_NPROCESSORS_ONLN c.Int = 58
+
+var cpuCount int
+var asyncHandleMapMu sync.Mutex
+var asyncHandleMap = make(map[int]*libuv.Async)
+var connID int32
+
 type Handler interface {
 	ServeHTTP(ResponseWriter, *Request)
 }
@@ -32,45 +40,182 @@ type Server struct {
 	Addr    string
 	Handler Handler
 
+	// uvLoop   *libuv.Loop
+	// uvServer libuv.Tcp
+
+	isShutdown atomic.Bool
+	// idleHandle libuv.Idle
+
+	// executor  *hyper.Executor
+	// http1Opts *hyper.Http1ServerconnOptions
+	// http2Opts *hyper.Http2ServerconnOptions
+
+	eventLoop []*eventLoop
+
+	// mu                sync.Mutex
+	// activeConnections map[*conn]struct{}
+}
+
+type eventLoop struct {
 	uvLoop     *libuv.Loop
 	uvServer   libuv.Tcp
-	inShutdown atomic.Bool
 	idleHandle libuv.Idle
 
-	executor *hyper.Executor
+	executor   *hyper.Executor
+	http1Opts  *hyper.Http1ServerconnOptions
+	http2Opts  *hyper.Http2ServerconnOptions
+	isShutdown atomic.Bool
 
 	mu                sync.Mutex
 	activeConnections map[*conn]struct{}
 }
 
 type conn struct {
+	asyncID       int
 	stream        libuv.Tcp
 	pollHandle    libuv.Poll
 	eventMask     c.Uint
 	readWaker     *hyper.Waker
 	writeWaker    *hyper.Waker
-	http1Opts     *hyper.Http1ServerconnOptions
-	http2Opts     *hyper.Http2ServerconnOptions
 	isClosing     atomic.Bool
 	closedHandles int32
 	remoteAddr    string
-	asyncHandle   *libuv.Async
 }
 
 type serviceUserdata struct {
-	host   [128]c.Char
-	port   [8]c.Char
-	conn   *conn
-	server *Server
+	asyncHandleID int
+	host          [128]c.Char
+	port          [8]c.Char
+	executor      *hyper.Executor
+}
+
+type threadArg struct {
+	host      string
+	port      int
+	eventLoop *eventLoop
 }
 
 func NewServer(addr string) *Server {
-	activeClients := make(map[*conn]struct{})
 	return &Server{
-		Addr:              addr,
-		Handler:           DefaultServeMux,
+		Addr:    addr,
+		Handler: DefaultServeMux,
+	}
+}
+
+func newEventLoop() (*eventLoop, error) {
+	activeClients := make(map[*conn]struct{})
+	el := &eventLoop{
 		activeConnections: activeClients,
 	}
+
+	executor := hyper.NewExecutor()
+	if executor == nil {
+		return nil, fmt.Errorf("failed to create Executor")
+	}
+	el.executor = executor
+
+	http1Opts := hyper.Http1ServerconnOptionsNew(el.executor)
+	if http1Opts == nil {
+		return nil, fmt.Errorf("failed to create http1_opts")
+	}
+	if hyperResult := http1Opts.HeaderReadTimeout(5 * 1000); hyperResult != hyper.OK {
+		return nil, fmt.Errorf("failed to set header read timeout for http1_opts")
+	}
+	el.http1Opts = http1Opts
+
+	http2Opts := hyper.Http2ServerconnOptionsNew(el.executor)
+	if http2Opts == nil {
+		return nil, fmt.Errorf("failed to create http2_opts")
+	}
+	if hyperResult := http2Opts.KeepAliveInterval(5); hyperResult != hyper.OK {
+		return nil, fmt.Errorf("failed to set keep alive interval for http2_opts")
+	}
+	if hyperResult := http2Opts.KeepAliveTimeout(5); hyperResult != hyper.OK {
+		return nil, fmt.Errorf("failed to set keep alive timeout for http2_opts")
+	}
+	el.http2Opts = http2Opts
+
+	el.uvLoop = libuv.LoopNew()
+	if el.uvLoop == nil {
+		return nil, fmt.Errorf("failed to get default loop")
+	}
+	el.uvLoop.SetData(unsafe.Pointer(el))
+
+	if r := libuv.InitTcpEx(el.uvLoop, &el.uvServer, cnet.AF_INET); r != 0 {
+		return nil, fmt.Errorf("failed to init TCP: %v", libuv.Strerror(libuv.Errno(r)))
+	}
+
+	return el, nil
+}
+
+func (el *eventLoop) run(host string, port int) error {
+	var sockaddr cnet.SockaddrIn
+	if r := libuv.Ip4Addr(c.AllocaCStr(host), c.Int(port), &sockaddr); r != 0 {
+		return fmt.Errorf("failed to create IP address: %v", libuv.Strerror(libuv.Errno(r)))
+	}
+
+	// Set SO_REUSEADDR
+	// yes := c.Int(1)
+	// fmt.Println("[debug] el.uvServer.GetIoWatcherFd(): ", el.uvServer.GetIoWatcherFd())
+	// result := cnet.SetSockOpt(el.uvServer.GetIoWatcherFd(), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, unsafe.Pointer(&yes), c.Uint(unsafe.Sizeof(yes)))
+	// if result != 0 {
+	// 	return fmt.Errorf("failed to set SO_REUSEADDR: %v", result)
+	// }
+
+	// result = cnet.SetSockOpt(el.uvServer.GetIoWatcherFd(), syscall.SOL_SOCKET, syscall.SO_REUSEPORT, unsafe.Pointer(&yes), c.Uint(unsafe.Sizeof(yes)))
+	// if result != 0 {
+	// 	return fmt.Errorf("failed to set SO_REUSEADDR: %v", result)
+	// }
+
+	if err := setReuseAddr(&el.uvServer); err != nil {
+		return fmt.Errorf("failed to set SO_REUSEADDR: %v", err)
+	}
+
+	if r := el.uvServer.Bind((*cnet.SockAddr)(unsafe.Pointer(&sockaddr)), 0); r != 0 {
+		return fmt.Errorf("failed to bind: %v", libuv.Strerror(libuv.Errno(r)))
+	}
+
+	//el.uvServer.Data = unsafe.Pointer(el)
+	if err := (*libuv.Stream)(&el.uvServer).Listen(128, onNewConnection); err != 0 {
+		return fmt.Errorf("failed to listen: %v", err)
+	}
+
+	if r := libuv.InitIdle(el.uvLoop, &el.idleHandle); r != 0 {
+		return fmt.Errorf("failed to initialize idle handler: %d", r)
+	}
+
+	(*libuv.Handle)(unsafe.Pointer(&el.idleHandle)).SetData(unsafe.Pointer(el))
+
+	if r := el.idleHandle.Start(onIdle); r != 0 {
+		return fmt.Errorf("failed to start idle handler: %d", r)
+	}
+
+	//os.Setenv("UV_THREADPOOL_SIZE", "1")
+
+	if r := el.uvLoop.Run(libuv.RUN_DEFAULT); r != 0 {
+		return fmt.Errorf("error in event loop: %d", r)
+	}
+
+	return nil
+}
+
+func setReuseAddr(handle *libuv.Tcp) error {
+	var fd libuv.OsFd
+	result := (*libuv.Handle)(unsafe.Pointer(handle)).Fileno(&fd)
+	if result != 0 {
+		return fmt.Errorf("Error getting file descriptor")
+	}
+
+	yes := c.Int(1)
+	if err := cnet.SetSockOpt(c.Int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, unsafe.Pointer(&yes), c.Uint(unsafe.Sizeof(yes))); err != 0 {
+		return fmt.Errorf("Error setting SO_REUSEADDR")
+	}
+
+	if err := cnet.SetSockOpt(c.Int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEPORT, unsafe.Pointer(&yes), c.Uint(unsafe.Sizeof(yes))); err != 0 {
+		return fmt.Errorf("Error setting SO_REUSEPORT")
+	}
+
+	return nil
 }
 
 // ErrServerClosed is returned by the [Server.Serve], [ServeTLS], [ListenAndServe],
@@ -83,14 +228,29 @@ func ListenAndServe(addr string, handler Handler) error {
 }
 
 func (srv *Server) ListenAndServe() error {
-	srv.uvLoop = libuv.DefaultLoop()
-	if srv.uvLoop == nil {
-		return fmt.Errorf("failed to get default loop")
+	cpuCount = int(c.Sysconf(_SC_NPROCESSORS_ONLN))
+	if cpuCount <= 0 {
+		cpuCount = 4
 	}
 
-	if r := libuv.InitTcp(srv.uvLoop, &srv.uvServer); r != 0 {
-		return fmt.Errorf("failed to init TCP: %v", libuv.Strerror(libuv.Errno(r)))
+	fmt.Printf("[debug] cpuCount: %d\n", cpuCount)
+
+	for i := 0; i < cpuCount; i++ {
+		el, err := newEventLoop()
+		if err != nil {
+			return fmt.Errorf("failed to create event loop: %v", err)
+		}
+		srv.eventLoop = append(srv.eventLoop, el)
 	}
+
+	// el, err := newEventLoop()
+	// if err != nil {
+	// 	return fmt.Errorf("failed to create event loop: %v", err)
+	// }
+	// el2, err := newEventLoop()
+	// if err != nil {
+	// 	return fmt.Errorf("failed to create event loop: %v", err)
+	// }
 
 	host, port, err := net.SplitHostPort(srv.Addr)
 	if err != nil {
@@ -102,48 +262,75 @@ func (srv *Server) ListenAndServe() error {
 		return fmt.Errorf("invalid port number: %v", err)
 	}
 
-	var sockaddr cnet.SockaddrIn
-	if r := libuv.Ip4Addr(c.AllocaCStr(host), c.Int(portNum), &sockaddr); r != 0 {
-		return fmt.Errorf("failed to create IP address: %v", libuv.Strerror(libuv.Errno(r)))
+	// go func() {
+	// 	err = el2.run(host, portNum)
+	// 	if err != nil {
+	// 		println("[debug] failed to run event loop: %v", err)
+	// 	}
+	// }()
+
+	//TODO(hackerchai): new logic for poll
+	// go func() {
+	// 	for {
+	// 		task := el.executor.Poll()
+	// 		if task != nil {
+	// 			handleTask(task)
+	// 			task = el.executor.Poll()
+	// 		}
+	// 	}
+	// }()
+
+	// err = el.run(host, portNum)
+	// if err != nil {
+	// 	return fmt.Errorf("failed to run event loop: %v", err)
+	// }
+
+	// Create a libuv thread pool with the same number of threads as event loops
+	threadPool := make([]*libuv.Thread, len(srv.eventLoop))
+	for i := range threadPool {
+		threadPool[i] = &libuv.Thread{}
 	}
 
-	if r := srv.uvServer.Bind((*cnet.SockAddr)(unsafe.Pointer(&sockaddr)), 0); r != 0 {
-		return fmt.Errorf("failed to bind: %v", libuv.Strerror(libuv.Errno(r)))
+	// Start each event loop in its own thread
+	for i, el := range srv.eventLoop {
+		threadArg := &threadArg{
+			host:      host,
+			port:      portNum,
+			eventLoop: el,
+		}
+
+		fmt.Printf("[debug] Creating thread %d\n", i)
+
+		if result := threadPool[i].Create(runEventLoopInThread, unsafe.Pointer(threadArg)); result != 0 {
+			return fmt.Errorf("failed to create thread: %v", err)
+		}
 	}
 
-	// Set SO_REUSEADDR
-	yes := c.Int(1)
-	result := cnet.SetSockOpt(srv.uvServer.GetIoWatcherFd(), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, unsafe.Pointer(&yes), c.Uint(unsafe.Sizeof(yes)))
-	if result != 0 {
-		return fmt.Errorf("failed to set SO_REUSEADDR: %v", result)
-	}
-
-	srv.uvServer.Data = unsafe.Pointer(srv)
-	if err := (*libuv.Stream)(&srv.uvServer).Listen(128, onNewConnection); err != 0 {
-		return fmt.Errorf("failed to listen: %v", err)
-	}
-
-	if r := libuv.InitIdle(srv.uvLoop, &srv.idleHandle); r != 0 {
-		fmt.Fprintf(os.Stderr, "Failed to initialize idle handler: %d\n", r)
-		os.Exit(1)
-	}
-
-	(*libuv.Handle)(unsafe.Pointer(&srv.idleHandle)).SetData(unsafe.Pointer(srv))
-
-	if r := srv.idleHandle.Start(onIdle); r != 0 {
-		fmt.Fprintf(os.Stderr, "Failed to start idle handler: %d\n", r)
-		os.Exit(1)
+	// Wait for all threads to complete
+	for _, thread := range threadPool {
+		if result := thread.Join(); result != 0 {
+			fmt.Printf("[debug] Failed to join thread: %v\n", err)
+		}
 	}
 
 	fmt.Printf("Listening on %s\n", srv.Addr)
 
-	res := srv.uvLoop.Run(libuv.RUN_DEFAULT)
-	if res != 0 {
-		fmt.Fprintf(os.Stderr, "Error in event loop: %v\n", res)
-		os.Exit(1)
-	}
+	// if r := srv.uvServer.Bind((*cnet.SockAddr)(unsafe.Pointer(&sockaddr)), 0); r != 0 {
+	// 	return fmt.Errorf("failed to bind: %v", libuv.Strerror(libuv.Errno(r)))
+	// }
 
 	return nil
+}
+
+func runEventLoopInThread(arg c.Pointer) {
+	tArg := (*threadArg)(arg)
+	host := tArg.host
+	port := tArg.port
+	el := tArg.eventLoop
+	err := el.run(host, port)
+	if err != nil {
+		fmt.Printf("[debug] failed to run event loop: %v", err)
+	}
 }
 
 func HandleFunc(pattern string, handler func(ResponseWriter, *Request)) {
@@ -157,9 +344,19 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 		return
 	}
 
-	srv := (*Server)(serverStream.Data)
-	if srv == nil {
-		fmt.Fprintf(os.Stderr, "Server is nil\n")
+	// srv := (*Server)((*libuv.Handle)(unsafe.Pointer(serverStream)).GetData())
+	// if srv == nil {
+	// 	fmt.Fprintf(os.Stderr, "Server is nil\n")
+	// 	return
+	// }
+	// el := (*eventLoop)((*libuv.Handle)(unsafe.Pointer(serverStream)).GetData())
+	// if el == nil {
+	// 	fmt.Fprintf(os.Stderr, "Event loop is nil\n")
+	// 	return
+	// }
+	el := (*eventLoop)((*libuv.Handle)(unsafe.Pointer(serverStream)).GetLoop().GetData())
+	if el == nil {
+		fmt.Fprintf(os.Stderr, "Event loop is nil\n")
 		return
 	}
 
@@ -171,15 +368,62 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 
 	fmt.Println("[debug] async handle creating")
 
-	conn.asyncHandle = &libuv.Async{}
-	srv.uvLoop.Async(conn.asyncHandle, onAsync)
+	requestNotifyHandle := &libuv.Async{}
+	el.uvLoop.Async(requestNotifyHandle, onAsync)
+	fmt.Println("[debug] async handle created")
+	asyncHandleMapMu.Lock()
+	asyncHandleMap[conn.asyncID] = requestNotifyHandle
+	asyncHandleMapMu.Unlock()
+	fmt.Println("[debug] async handle added to map")
 
-	libuv.InitTcp(srv.uvLoop, &conn.stream)
+	libuv.InitTcp(el.uvLoop, &conn.stream)
 	conn.stream.Data = unsafe.Pointer(conn)
 
 	if serverStream.Accept((*libuv.Stream)(unsafe.Pointer(&conn.stream))) == 0 {
 		fmt.Println("[debug] Accepted new connection")
-		r := libuv.PollInit(srv.uvLoop, &conn.pollHandle, libuv.OsFd(conn.stream.GetIoWatcherFd()))
+
+		userData := createServiceUserdata()
+		if userData == nil {
+			fmt.Fprintf(os.Stderr, "Failed to create service userdata\n")
+			(*libuv.Handle)(unsafe.Pointer(&conn.stream)).Close(nil)
+			return
+		}
+
+		if el.executor == nil {
+			fmt.Fprintf(os.Stderr, "Failed to get executor\n")
+			(*libuv.Handle)(unsafe.Pointer(&conn.stream)).Close(nil)
+			return
+		}
+		//userData.setExecutor(srv.executor)
+		userData.executor = el.executor
+		userData.asyncHandleID = conn.asyncID
+
+		// if srv.Handler == nil {
+		// 	fmt.Fprintf(os.Stderr, "Failed to get handler\n")
+		// 	(*libuv.Handle)(unsafe.Pointer(&conn.stream)).Close(nil)
+		// 	return
+		// }
+		//userData.handler = srv.Handler
+		//userData.requestNotifyHandle = requestNotifyHandle
+
+		var addr cnet.SockaddrStorage
+		addrlen := c.Int(unsafe.Sizeof(addr))
+		conn.stream.Getpeername((*cnet.SockAddr)(c.Pointer(&addr)), &addrlen)
+
+		if addr.Family == cnet.AF_INET {
+			s := (*cnet.SockaddrIn)(unsafe.Pointer(&addr))
+			libuv.Ip4Name(s, (*c.Char)(&userData.host[0]), unsafe.Sizeof(userData.host))
+			c.Snprintf((*c.Char)(&userData.port[0]), unsafe.Sizeof(userData.port), c.Str("%d"), cnet.Ntohs(s.Port))
+		} else if addr.Family == cnet.AF_INET6 {
+			s := (*cnet.SockaddrIn6)(unsafe.Pointer(&addr))
+			libuv.Ip6Name(s, (*c.Char)(&userData.host[0]), unsafe.Sizeof(userData.host))
+			c.Snprintf((*c.Char)(&userData.port[0]), unsafe.Sizeof(userData.port), c.Str("%d"), cnet.Ntohs(s.Port))
+		}
+
+		//TODO(hackerchai): use userData.host and userData.port
+		conn.remoteAddr = c.GoString((*c.Char)(&userData.host[0])) + ":" + c.GoString((*c.Char)(&userData.port[0]))
+
+		r := libuv.PollInit(el.uvLoop, &conn.pollHandle, libuv.OsFd(conn.stream.GetIoWatcherFd()))
 		if r < 0 {
 			fmt.Fprintf(os.Stderr, "uv_poll_init error: %s\n", libuv.Strerror(libuv.Errno(r)))
 			(*libuv.Handle)(unsafe.Pointer(&conn.stream)).Close(nil)
@@ -194,79 +438,16 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 			return
 		}
 
-		userdata := createServiceUserdata()
-		userdata.server = srv
-		if userdata == nil {
-			fmt.Fprintf(os.Stderr, "Failed to create service userdata\n")
-			(*libuv.Handle)(unsafe.Pointer(&conn.stream)).Close(nil)
-			return
-		}
-
-		var addr cnet.SockaddrStorage
-		addrlen := c.Int(unsafe.Sizeof(addr))
-		conn.stream.Getpeername((*cnet.SockAddr)(c.Pointer(&addr)), &addrlen)
-
-		if addr.Family == cnet.AF_INET {
-			s := (*cnet.SockaddrIn)(unsafe.Pointer(&addr))
-			libuv.Ip4Name(s, (*c.Char)(&userdata.host[0]), unsafe.Sizeof(userdata.host))
-			c.Snprintf((*c.Char)(&userdata.port[0]), unsafe.Sizeof(userdata.port), c.Str("%d"), cnet.Ntohs(s.Port))
-		} else if addr.Family == cnet.AF_INET6 {
-			s := (*cnet.SockaddrIn6)(unsafe.Pointer(&addr))
-			libuv.Ip6Name(s, (*c.Char)(&userdata.host[0]), unsafe.Sizeof(userdata.host))
-			c.Snprintf((*c.Char)(&userdata.port[0]), unsafe.Sizeof(userdata.port), c.Str("%d"), cnet.Ntohs(s.Port))
-		}
-
-		conn.remoteAddr = c.GoString((*c.Char)(&userdata.host[0])) + ":" + c.GoString((*c.Char)(&userdata.port[0]))
-
-		executor := hyper.NewExecutor()
-		if executor == nil {
-			fmt.Fprintf(os.Stderr, "Failed to create Executor\n")
-			(*libuv.Handle)(unsafe.Pointer(&conn.pollHandle)).Close(nil)
-			(*libuv.Handle)(unsafe.Pointer(&conn.stream)).Close(nil)
-			return
-		}
-		srv.executor = executor
-
 		fmt.Println("[debug] Conn created")
-		srv.trackConn(conn, true)
+		el.trackConn(conn, true)
 		fmt.Println("[debug] Conn tracked")
-
-		userdata.conn = conn
 
 		io := createIo(conn)
 		service := hyper.ServiceNew(serverCallback)
-		service.SetUserdata(unsafe.Pointer(userdata), nil)
-		http1Opts := hyper.Http1ServerconnOptionsNew(srv.executor)
-		if http1Opts == nil {
-			fmt.Fprintf(os.Stderr, "Failed to create http1_opts\n")
-			os.Exit(1)
-		}
-		result := http1Opts.HeaderReadTimeout(5 * 1000)
-		if result != hyper.OK {
-			fmt.Fprintf(os.Stderr, "Failed to set header read timeout for http1_opts\n")
-			os.Exit(1)
-		}
-		conn.http1Opts = http1Opts
+		service.SetUserdata(unsafe.Pointer(userData), nil)
 
-		http2Opts := hyper.Http2ServerconnOptionsNew(srv.executor)
-		if http2Opts == nil {
-			fmt.Fprintf(os.Stderr, "Failed to create http2_opts\n")
-			os.Exit(1)
-		}
-		result = http2Opts.KeepAliveInterval(5)
-		if result != hyper.OK {
-			fmt.Fprintf(os.Stderr, "Failed to set keep alive interval for http2_opts\n")
-			os.Exit(1)
-		}
-		result = http2Opts.KeepAliveTimeout(5)
-		if result != hyper.OK {
-			fmt.Fprintf(os.Stderr, "Failed to set keep alive timeout for http2_opts\n")
-			os.Exit(1)
-		}
-		conn.http2Opts = http2Opts
-
-		serverconn := hyper.ServeHttpXConnection(http1Opts, http2Opts, io, service)
-		srv.executor.Push(serverconn)
+		serverConn := hyper.ServeHttpXConnection(el.http1Opts, el.http2Opts, io, service)
+		el.executor.Push(serverConn)
 	} else {
 		fmt.Println("[debug] Client not accepted")
 		(*libuv.Handle)(unsafe.Pointer(&conn.pollHandle)).Close(nil)
@@ -277,10 +458,14 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 func onAsync(asyncHandle *libuv.Async) {
 	fmt.Println("[debug] onAsync called")
 	taskData := (*taskData)(asyncHandle.GetData())
+	if taskData == nil {
+		fmt.Println("[debug] taskData is nil")
+		return
+	}
 	dataTask := taskData.hyperBody.Data()
 	dataTask.SetUserdata(c.Pointer(taskData), nil)
 	if dataTask != nil {
-		r := taskData.server.executor.Push(dataTask)
+		r := taskData.executor.Push(dataTask)
 		fmt.Printf("[debug] onAsync push data task: %d\n", r)
 		if r != hyper.OK {
 			fmt.Printf("failed to push data task: %d\n", r)
@@ -290,26 +475,49 @@ func onAsync(asyncHandle *libuv.Async) {
 }
 
 func onIdle(handle *libuv.Idle) {
-	srv := (*Server)((*libuv.Handle)(unsafe.Pointer(handle)).GetData())
-	if srv.executor != nil {
-		task := srv.executor.Poll()
+	// el := (*eventLoop)((*libuv.Handle)(unsafe.Pointer(handle)).GetData())
+	el := (*eventLoop)((*libuv.Handle)(unsafe.Pointer(handle)).GetLoop().GetData())
+	if el.executor != nil {
+		task := el.executor.Poll()
 		for task != nil {
-			srv.handleTask(task)
-			task = srv.executor.Poll()
+			handleTask(task)
+			task = el.executor.Poll()
 		}
 	}
 
-	if srv.shuttingDown() {
+	if el.shuttingDown() {
 		fmt.Println("Shutdown initiated, cleaning up...")
 		handle.Stop()
 	}
 }
 
-func serverCallback(userdata unsafe.Pointer, hyperReq *hyper.Request, channel *hyper.ResponseChannel) {
-	userData := (*serviceUserdata)(userdata)
-	srv := userData.server
-	if srv == nil {
-		fmt.Fprintf(os.Stderr, "Error: Received null server\n")
+func doNothing(handle *libuv.Idle) {
+	return
+}
+
+// func (s *serviceUserdata) setExecutor(exec *hyper.Executor) {
+// 	s.executor.Store(exec)
+// }
+
+// func (s *serviceUserdata) getExecutor() *hyper.Executor {
+// 	return s.executor.Load()
+// }
+
+func serverCallback(userData unsafe.Pointer, hyperReq *hyper.Request, channel *hyper.ResponseChannel) {
+	payload := (*serviceUserdata)(userData)
+	// srv := userData.server
+	// if srv == nil {
+	// 	fmt.Fprintf(os.Stderr, "Error: Received null server\n")
+	// 	return
+	// }
+	if payload == nil {
+		fmt.Fprintf(os.Stderr, "Error: Received null userData\n")
+		return
+	}
+
+	executor := payload.executor
+	if executor == nil {
+		fmt.Fprintf(os.Stderr, "Error: Received null executor\n")
 		return
 	}
 
@@ -318,25 +526,48 @@ func serverCallback(userdata unsafe.Pointer, hyperReq *hyper.Request, channel *h
 		return
 	}
 
-	req, err := userData.conn.readRequest(srv, hyperReq)
+	connID := payload.asyncHandleID
+	asyncHandleMapMu.Lock()
+	requestNotifyHandle, ok := asyncHandleMap[connID]
+	asyncHandleMapMu.Unlock()
+	if !ok {
+		fmt.Println("[debug] requestNotifyHandle not found")
+		return
+	}
+
+	host := payload.host
+	port := payload.port
+	remoteAddr := c.GoString(&host[0]) + ":" + c.GoString(&port[0])
+	fmt.Printf("[debug] Remote address: %s\n", remoteAddr)
+
+	req, err := readRequest(executor, hyperReq, requestNotifyHandle, remoteAddr)
 	if err != nil {
 		fmt.Printf("Error creating request: %v\n", err)
 		return
 	}
 
-	res := newResponse(srv, channel)
+	res := newResponse(channel)
 	fmt.Println("[debug] Response created")
 
 	//TODO(hackerchai): replace with no goroutine
-	// userData.server.Handler.ServeHTTP(res, req)
-	// res.finalize()
-	go func() {
-		userData.server.Handler.ServeHTTP(res, req)
-		res.finalize()
-	}()
+	fmt.Println("[debug] Serving HTTP")
+	DefaultServeMux.ServeHTTP(res, req)
+	//srv.Handler.ServeHTTP(res, req)
+	fmt.Println("[debug] Response finalizing")
+	res.finalize()
+	fmt.Println("[debug] Response finalized")
+
+	// go func() {
+	// 	fmt.Println("[debug] Serving HTTP")
+	// 	DefaultServeMux.ServeHTTP(res, req)
+	// 	//srv.Handler.ServeHTTP(res, req)
+	// 	fmt.Println("[debug] Response finalizing")
+	// 	res.finalize()
+	// 	fmt.Println("[debug] Response finalized")
+	// }()
 }
 
-func (srv *Server) handleTask(task *hyper.Task) {
+func handleTask(task *hyper.Task) {
 	hyperTaskType := task.Type()
 	// Debug
 	fmt.Printf("[debug] Task type: %s\n", getTaskTypeString(hyperTaskType))
@@ -351,8 +582,7 @@ func (srv *Server) handleTask(task *hyper.Task) {
 	if payload != nil {
 		switch payload.taskFlag {
 		case getBodyTask:
-			handleGetBodyTask(srv, hyperTaskType, task, payload)
-			return
+			handleGetBodyTask(hyperTaskType, task, payload)
 		case setBodyTask:
 			handleSetBodyTask(hyperTaskType, task)
 			return
@@ -374,10 +604,13 @@ func (srv *Server) handleTask(task *hyper.Task) {
 		fmt.Println("[debug] Server connection task handled")
 		task.Free()
 		return
+	default:
+		fmt.Println("[debug] Unknown task type")
+		return
 	}
 }
 
-func handleGetBodyTask(srv *Server, hyperTaskType hyper.TaskReturnType, task *hyper.Task, payload *taskData) {
+func handleGetBodyTask(hyperTaskType hyper.TaskReturnType, task *hyper.Task, payload *taskData) {
 	switch hyperTaskType {
 	case hyper.TaskError:
 		handleTaskError(task)
@@ -385,7 +618,9 @@ func handleGetBodyTask(srv *Server, hyperTaskType hyper.TaskReturnType, task *hy
 		handleTaskBuffer(task, payload)
 	case hyper.TaskEmpty:
 		fmt.Println("[debug] Get body task closing request body")
-		payload.requestBody.Close()
+		if payload.requestBody != nil {
+			payload.requestBody.Close()
+		}
 		task.Free()
 	}
 }
@@ -439,16 +674,16 @@ func getTaskTypeString(taskType hyper.TaskReturnType) string {
 	}
 }
 
-func (s *Server) trackConn(c *conn, add bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.activeConnections == nil {
-		s.activeConnections = make(map[*conn]struct{})
+func (el *eventLoop) trackConn(c *conn, add bool) {
+	el.mu.Lock()
+	defer el.mu.Unlock()
+	if el.activeConnections == nil {
+		el.activeConnections = make(map[*conn]struct{})
 	}
 	if add {
-		s.activeConnections[c] = struct{}{}
+		el.activeConnections[c] = struct{}{}
 	} else {
-		delete(s.activeConnections, c)
+		delete(el.activeConnections, c)
 	}
 }
 
@@ -526,7 +761,6 @@ func writeCb(userdata unsafe.Pointer, ctx *hyper.Context, buf *byte, bufLen uint
 }
 
 func onPoll(handle *libuv.Poll, status c.Int, events c.Int) {
-	fmt.Printf("[debug] onPoll called\n")
 	conn := (*conn)((*libuv.Handle)(unsafe.Pointer(handle)).GetData())
 
 	if status < 0 {
@@ -577,40 +811,14 @@ func createConnData() (*conn, error) {
 	}
 	conn.isClosing.Store(false)
 	conn.closedHandles = 0
+	conn.asyncID = int(connID) + 1
 
 	return conn, nil
 }
 
 func freeConnData(userdata c.Pointer) {
 	conn := (*conn)(userdata)
-	if conn != nil && !conn.isClosing.Swap(true) {
-		fmt.Printf("[debug] Closing connection...\n")
-		if conn.readWaker != nil {
-			conn.readWaker.Free()
-			conn.readWaker = nil
-		}
-		if conn.writeWaker != nil {
-			conn.writeWaker.Free()
-			conn.writeWaker = nil
-		}
-
-		if conn.http1Opts != nil {
-			conn.http1Opts.Free()
-			conn.http1Opts = nil
-		}
-		if conn.http2Opts != nil {
-			conn.http2Opts.Free()
-			conn.http2Opts = nil
-		}
-
-		if (*libuv.Handle)(unsafe.Pointer(&conn.pollHandle)).IsClosing() == 0 {
-			(*libuv.Handle)(unsafe.Pointer(&conn.pollHandle)).Close(nil)
-		}
-
-		if (*libuv.Handle)(unsafe.Pointer(&conn.stream)).IsClosing() == 0 {
-			(*libuv.Handle)(unsafe.Pointer(&conn.stream)).Close(nil)
-		}
-	}
+	conn.Close()
 }
 
 func closeWalkCb(handle *libuv.Handle, arg c.Pointer) {
@@ -620,31 +828,48 @@ func closeWalkCb(handle *libuv.Handle, arg c.Pointer) {
 }
 
 func (srv *Server) Close() error {
-	srv.inShutdown.Store(true)
-	srv.mu.Lock()
-	defer srv.mu.Unlock()
+	srv.isShutdown.Store(true)
 
-	for c := range srv.activeConnections {
-		c.Close()
+	// for c := range el.activeConnections {
+	// 	c.Close()
 
-		delete(srv.activeConnections, c)
-	}
+	// 	delete(srv.activeConnections, c)
+	// }
 
-	if srv.executor != nil {
-		srv.executor.Free()
-		srv.executor = nil
-	}
+	// if srv.executor != nil {
+	// 	srv.executor.Free()
+	// 	srv.executor = nil
+	// }
 
-	srv.uvLoop.Walk(closeWalkCb, nil)
-	srv.uvLoop.Run(libuv.RUN_ONCE)
-	(*libuv.Handle)(unsafe.Pointer(&srv.uvServer)).Close(nil)
+	// if exec := srv.executor; exec != nil {
+	// 	srv.executor = nil
+	// 	exec.Free()
+	// }
 
-	srv.uvLoop.Close()
+	// if srv.http1Opts != nil {
+	// 	srv.http1Opts.Free()
+	// 	srv.http1Opts = nil
+	// }
+
+	// if srv.http2Opts != nil {
+	// 	srv.http2Opts.Free()
+	// 	srv.http2Opts = nil
+	// }
+
+	// srv.uvLoop.Walk(closeWalkCb, nil)
+	// srv.uvLoop.Run(libuv.RUN_ONCE)
+	// (*libuv.Handle)(unsafe.Pointer(&srv.uvServer)).Close(nil)
+
+	// srv.uvLoop.Close()
 	return nil
 }
 
 func (s *Server) shuttingDown() bool {
-	return s.inShutdown.Load()
+	return s.isShutdown.Load()
+}
+
+func (el *eventLoop) shuttingDown() bool {
+	return el.isShutdown.Load()
 }
 
 func (c *conn) shuttingDown() bool {
@@ -652,31 +877,25 @@ func (c *conn) shuttingDown() bool {
 }
 
 func (c *conn) Close() {
-	c.isClosing.Store(true)
-	if c.shuttingDown() {
-		return
-	}
+	if c != nil && !c.isClosing.Swap(true) {
+		fmt.Printf("[debug] Closing connection...\n")
+		if c.readWaker != nil {
+			c.readWaker.Free()
+			c.readWaker = nil
+		}
+		if c.writeWaker != nil {
+			c.writeWaker.Free()
+			c.writeWaker = nil
+		}
 
-	if c.readWaker != nil {
-		c.readWaker.Free()
-		c.readWaker = nil
-	}
-	if c.writeWaker != nil {
-		c.writeWaker.Free()
-		c.writeWaker = nil
-	}
+		if (*libuv.Handle)(unsafe.Pointer(&c.pollHandle)).IsClosing() == 0 {
+			(*libuv.Handle)(unsafe.Pointer(&c.pollHandle)).Close(nil)
+		}
 
-	if c.http1Opts != nil {
-		c.http1Opts.Free()
-		c.http1Opts = nil
+		if (*libuv.Handle)(unsafe.Pointer(&c.stream)).IsClosing() == 0 {
+			(*libuv.Handle)(unsafe.Pointer(&c.stream)).Close(nil)
+		}
 	}
-	if c.http2Opts != nil {
-		c.http2Opts.Free()
-		c.http2Opts = nil
-	}
-
-	(*libuv.Handle)(unsafe.Pointer(&c.pollHandle)).Close(nil)
-	(*libuv.Handle)(unsafe.Pointer(&c.stream)).Close(nil)
 }
 
 type HandlerFunc func(ResponseWriter, *Request)

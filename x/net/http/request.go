@@ -12,6 +12,7 @@ import (
 
 	"github.com/goplus/llgo/c"
 	"github.com/goplus/llgo/rust/hyper"
+	"github.com/goplus/llgo/c/libuv"
 )
 
 type Request struct {
@@ -35,14 +36,14 @@ type Request struct {
 	timeout    time.Duration
 }
 
-func (conn *conn) readRequest(srv *Server, hyperReq *hyper.Request) (*Request, error) {
+func readRequest(executor *hyper.Executor, hyperReq *hyper.Request, requestNotifyHandle *libuv.Async, remoteAddr string) (*Request, error) {
 	println("[debug] readRequest called")
 	req := Request{
 		Header:  make(Header),
 		timeout: 0,
 		Body:    nil,
 	}
-	req.RemoteAddr = conn.remoteAddr
+	req.RemoteAddr = remoteAddr
 
 	headers := hyperReq.Headers()
 	if headers != nil {
@@ -135,10 +136,10 @@ func (conn *conn) readRequest(srv *Server, hyperReq *hyper.Request) (*Request, e
 
 	body := hyperReq.Body()
 	if body != nil {
-		task := body.Data()
+		//task := body.Data()
 		taskFlag := getBodyTask
 
-		requestBody := newRequestBody(conn.asyncHandle)
+		requestBody := newRequestBody(requestNotifyHandle)
 		req.Body = requestBody
 
 		taskData := taskData{
@@ -146,28 +147,17 @@ func (conn *conn) readRequest(srv *Server, hyperReq *hyper.Request) (*Request, e
 			responseBody: nil,
 			requestBody:  requestBody,
 			taskFlag:     taskFlag,
-			server:       srv,
+			executor:     executor,
 		}
-		task.SetUserdata(c.Pointer(&taskData), nil)
 
-		conn.asyncHandle.SetData(c.Pointer(&taskData))
+		requestNotifyHandle.SetData(c.Pointer(&taskData))
 		fmt.Println("[debug] async task set")
-		if task != nil {
-			r := srv.executor.Push(task)
-			if r != hyper.OK {
-				fmt.Printf("failed to push body foreach task: %d\n", r)
-				task.Free()
-				return nil, fmt.Errorf("failed to push body foreach task: %v", r)
-			}
-		} else {
-			return nil, fmt.Errorf("failed to create body foreach task")
-		}
 
 	} else {
 		return nil, fmt.Errorf("failed to get request body")
 	}
 
-	hyperReq.Free()
+	//hyperReq.Free()
 
 	return &req, nil
 }

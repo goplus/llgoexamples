@@ -3,7 +3,6 @@ package http
 import (
 	"errors"
 	"fmt"
-	"io"
 
 	"github.com/goplus/llgo/c/libuv"
 )
@@ -31,33 +30,34 @@ func newRequestBody(asyncHandle *libuv.Async) *requestBody {
 }
 
 func (rb *requestBody) Read(p []byte) (n int, err error) {
-	fmt.Println("[debug] requestBody.Read called")
-	// If there are still unread chunks, read them first
-	if len(rb.chunk) > 0 {
-		n = copy(p, rb.chunk)
-		rb.chunk = rb.chunk[n:]
-		return n, nil
+	fmt.Println("[debug] RequestBody Read called")
+	select {
+	case <-rb.done:
+		err = rb.readCloseError()
+		return
+	default:
 	}
 
-	// Attempt to read a new chunk from a channel
-	select {
-	case chunk, ok := <-rb.readCh:
-		if !ok {
-			// The channel has been closed, indicating that all data has been read
-			return 0, rb.readCloseError()
+	for n < len(p) {
+		if len(rb.chunk) == 0 {
+			rb.asyncHandle.Send()
+			fmt.Println("[debug] RequestBody Read asyncHandle.Send called")
+			select {
+			case chunk := <-rb.readCh:
+				rb.chunk = chunk
+				fmt.Println("[debug] RequestBody Read chunk received")
+			case <-rb.done:
+				err = rb.readCloseError()
+				return
+			}
 		}
-		n = copy(p, chunk)
-		if n < len(chunk) {
-			// If the capacity of p is insufficient to hold the whole chunk, save the rest of the chunk
-			rb.chunk = chunk[n:]
-		}
-		fmt.Println("[debug] requestBody.Read async send")
-		rb.asyncHandle.Send()
-		return n, nil
-	case <-rb.done:
-		// If the done channel is closed, the read needs to be terminated
-		return 0, rb.readCloseError()
+
+		copied := copy(p[n:], rb.chunk)
+		n += copied
+		rb.chunk = rb.chunk[copied:]
 	}
+
+	return
 }
 
 func (rb *requestBody) readCloseError() error {
@@ -69,8 +69,11 @@ func (rb *requestBody) readCloseError() error {
 
 func (rb *requestBody) closeRead(err error) error {
 	fmt.Println("[debug] RequestBody closeRead called")
+	if rb.rerr != nil {
+		return nil
+	}
 	if err == nil {
-		err = io.EOF
+		err = ErrClosedRequestBody
 	}
 	rb.rerr = err
 	close(rb.done)

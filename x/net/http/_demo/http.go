@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 
 	"github.com/goplus/llgo/x/net/http"
 )
@@ -18,16 +17,18 @@ func echoHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf(">> URL: %s\n", r.URL.String())
 	fmt.Printf(">> RemoteAddr: %s\n", r.RemoteAddr)
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Error reading request body", http.StatusInternalServerError)
-		return
-	}
-	defer r.Body.Close()
-	fmt.Printf(">> Body: %s\n", string(body))
+	// body, err := io.ReadAll(r.Body)
+	// if err != nil {
+	// 	http.Error(w, "Error reading request body", http.StatusInternalServerError)
+	// 	return
+	// }
+	// defer r.Body.Close()
+	// fmt.Printf(">> Body: %s\n", string(body))
 
+	// w.Header().Set("Content-Type", "text/plain")
+	// w.Write(body)
 	w.Header().Set("Content-Type", "text/plain")
-	w.Write(body)
+	w.Write([]byte("Hello, World!"))
 }
 
 func main() {

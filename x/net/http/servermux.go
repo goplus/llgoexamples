@@ -20,14 +20,21 @@ var DefaultServeMux = &ServeMux{m: make(map[string]muxEntry)}
 
 func (mux *ServeMux) ServeHTTP(w ResponseWriter, r *Request) {
 	fmt.Printf("[debug] ServeHTTP called\n")
+	// NotFoundHandler().ServeHTTP(w, r)
+	// return
 	h, pattern := mux.Handler(r)
 	fmt.Printf("[debug] Handler found for pattern: %s\n", pattern)
 	h.ServeHTTP(w, r)
 }
 
 func (mux *ServeMux) Handler(r *Request) (h Handler, pattern string) {
+	fmt.Printf("[debug] Mux Handler called\n")
 	mux.mu.RLock()
 	defer mux.mu.RUnlock()
+	if r.URL == nil {
+		fmt.Println("[debug] r.URL is nil")
+	}
+	fmt.Printf("[debug] Handler called: r.URL.Path = %s\n", r.URL.Path)
 
 	h, pattern = mux.m[r.URL.Path].h, r.URL.Path
 	if h == nil {

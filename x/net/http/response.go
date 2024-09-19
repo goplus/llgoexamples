@@ -14,7 +14,6 @@ type response struct {
 	statusCode   int
 	written      bool
 	body         []byte
-	server       *Server
 	hyperChannel *hyper.ResponseChannel
 	hyperResp    *hyper.Response
 }
@@ -29,7 +28,7 @@ type taskData struct {
 	hyperBody    *hyper.Body
 	responseBody *responseBodyRaw
 	requestBody  *requestBody
-	server       *Server
+	executor     *hyper.Executor
 	taskFlag     taskFlag
 }
 
@@ -42,16 +41,14 @@ const (
 
 var DefaultChunkSize uintptr = 8192
 
-func newResponse(server *Server, hyperChannel *hyper.ResponseChannel) *response {
+func newResponse(hyperChannel *hyper.ResponseChannel) *response {
 	fmt.Printf("[debug] newResponse called\n")
 
 	return &response{
 		header:       make(Header),
-		hyperChannel: hyperChannel,
-		server:       server,
-		statusCode:   200,
 		written:      false,
-		body:         nil,
+		statusCode:   200,
+		hyperChannel: hyperChannel,
 		hyperResp:    hyper.NewResponse(),
 	}
 }
@@ -84,7 +81,7 @@ func (r *response) WriteHeader(statusCode int) {
 	fmt.Printf("[debug] < HTTP/1.1 %d\n", statusCode)
 	for key, values := range r.header {
 		for _, value := range values {
-			fmt.Printf("< %s: %s\n", key, value)
+			fmt.Printf("[debug] < %s: %s\n", key, value)
 		}
 	}
 
@@ -116,8 +113,6 @@ func (r *response) finalize() error {
 		r.WriteHeader(200)
 	}
 
-	r.hyperResp = hyper.NewResponse()
-
 	if r.hyperResp == nil {
 		return fmt.Errorf("failed to create response")
 	}
@@ -134,9 +129,10 @@ func (r *response) finalize() error {
 		return fmt.Errorf("failed to create body")
 	}
 	taskData := &taskData{
-		hyperBody:    nil,
+		hyperBody:    body,
 		responseBody: &bodyData,
-		server:       r.server,
+		requestBody:  nil,
+		executor:     nil,
 		taskFlag:     setBodyTask,
 	}
 	body.SetDataFunc(setBodyDataFunc)
@@ -163,6 +159,7 @@ func setBodyDataFunc(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) 
 		fmt.Println("[debug] taskData is nil")
 		return hyper.PollError
 	}
+	fmt.Println("[debug] taskData is not nil")
 	body := taskData.responseBody
 
 	if body.len > 0 {
