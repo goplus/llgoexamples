@@ -10,10 +10,10 @@ func LastIndexByteString(s string, c byte) int {
 }
 
 func IndexByteString(s string, c byte) int {
-    for i := 0; i < len(s); i++ {
-        if s[i] == c {
-            return i
-        }
-    }
-    return -1
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
 }
