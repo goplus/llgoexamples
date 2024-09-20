@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/goplus/llgoexamples/x/net/http"
+	"github.com/goplus/llgo/x/net/http"
 )
 
 func echoHandler(w http.ResponseWriter, r *http.Request) {
