@@ -10,10 +10,3 @@ package http
 // size is anyway.  (if we have the bytes on the machine, we might as
 // well read them)
 const maxPostHandlerReadBytes = 256 << 10
-
-type readResult struct {
-	_   incomparable
-	n   int
-	err error
-	b   byte // byte read, if n == 1
-}

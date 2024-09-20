@@ -11,8 +11,6 @@ import (
 	"reflect"
 	"sort"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -157,8 +155,7 @@ func (c *Client) do(req *Request) (retres *Response, reterr error) {
 				URL:      u,
 				Header:   make(Header),
 				Host:     host,
-				Cancel:   ireq.Cancel,
-				ctx:      ireq.ctx,
+				//Cancel:   ireq.Cancel,
 
 				timer:     ireq.timer,
 				timeoutch: ireq.timeoutch,
@@ -307,16 +304,15 @@ func send(ireq *Request, rt RoundTripper, deadline time.Time) (resp *Response, d
 		forkReq()
 	}
 
-	// TODO(spongehah) tmp timeout(send)
+	// TODO(hah) tmp timeout(send): LLGo has not yet implemented startTimer.
 	//stopTimer, didTimeout := setRequestCancel(req, rt, deadline)
 	req.timeoutch = make(chan struct{}, 1)
 	req.deadline = deadline
-	req.ctx.Done()
 	if deadline.IsZero() {
 		didTimeout = alwaysFalse
 		defer close(req.timeoutch)
 	} else {
-		didTimeout = func() bool { return req.timer.GetDueIn() == 0 }
+		didTimeout = func() bool { return time.Now().After(deadline) }
 	}
 
 	resp, err = rt.RoundTrip(req)
@@ -478,6 +474,95 @@ func (b *cancelTimerBody) Close() error {
 	return err
 }
 
+//// setRequestCancel sets req.Cancel and adds a deadline context to req
+//// if deadline is non-zero. The RoundTripper's type is used to
+//// determine whether the legacy CancelRequest behavior should be used.
+////
+//// As background, there are three ways to cancel a request:
+//// First was Transport.CancelRequest. (deprecated)
+//// Second was Request.Cancel.
+//// Third was Request.Context.
+//// This function populates the second and third, and uses the first if it really needs to.
+//func setRequestCancel(req *Request, rt RoundTripper, deadline time.Time) (stopTimer func(), didTimeout func() bool) {
+//	if deadline.IsZero() {
+//		return nop, alwaysFalse
+//	}
+//	knownTransport := knownRoundTripperImpl(rt, req)
+//	oldCtx := req.Context()
+//
+//	if req.Cancel == nil && knownTransport {
+//		// If they already had a Request.Context that's
+//		// expiring sooner, do nothing:
+//		if !timeBeforeContextDeadline(deadline, oldCtx) {
+//			return nop, alwaysFalse
+//		}
+//
+//		var cancelCtx func()
+//		req.ctx, cancelCtx = context.WithDeadline(oldCtx, deadline)
+//		return cancelCtx, func() bool { return time.Now().After(deadline) }
+//	}
+//	initialReqCancel := req.Cancel // the user's original Request.Cancel, if any
+//
+//	var cancelCtx func()
+//	if timeBeforeContextDeadline(deadline, oldCtx) {
+//		req.ctx, cancelCtx = context.WithDeadline(oldCtx, deadline)
+//	}
+//
+//	cancel := make(chan struct{})
+//	req.Cancel = cancel
+//
+//	doCancel := func() {
+//		// The second way in the func comment above:
+//		close(cancel)
+//		// The first way, used only for RoundTripper
+//		// implementations written before Go 1.5 or Go 1.6.
+//		type canceler interface{ CancelRequest(*Request) }
+//		if v, ok := rt.(canceler); ok {
+//			v.CancelRequest(req)
+//		}
+//	}
+//
+//	stopTimerCh := make(chan struct{})
+//	var once sync.Once
+//	stopTimer = func() {
+//		once.Do(func() {
+//			close(stopTimerCh)
+//			if cancelCtx != nil {
+//				cancelCtx()
+//			}
+//		})
+//	}
+//
+//	timer := time.NewTimer(time.Until(deadline))
+//	var timedOut atomic.Bool
+//
+//	go func() {
+//		select {
+//		case <-initialReqCancel:
+//			doCancel()
+//			timer.Stop()
+//		case <-timer.C:
+//			timedOut.Store(true)
+//			doCancel()
+//		case <-stopTimerCh:
+//			timer.Stop()
+//		}
+//	}()
+//
+//	return stopTimer, timedOut.Load
+//}
+
+// timeBeforeContextDeadline reports whether the non-zero Time t is
+// before ctx's deadline, if any. If ctx does not have a deadline, it
+// always reports true (the deadline is considered infinite).
+func timeBeforeContextDeadline(t time.Time, ctx context.Context) bool {
+	d, ok := ctx.Deadline()
+	if !ok {
+		return true
+	}
+	return t.Before(d)
+}
+
 // knownRoundTripperImpl reports whether rt is a RoundTripper that's
 // maintained by the Go team and known to implement the latest
 // optional semantics (notably contexts). The Request is used
@@ -504,122 +589,6 @@ func knownRoundTripperImpl(rt RoundTripper, req *Request) bool {
 	}
 	return false
 }
-
-// setRequestCancel sets req.Cancel and adds a deadline context to req
-// if deadline is non-zero. The RoundTripper's type is used to
-// determine whether the legacy CancelRequest behavior should be used.
-//
-// As background, there are three ways to cancel a request:
-// First was Transport.CancelRequest. (deprecated)
-// Second was Request.Cancel.
-// Third was Request.Context.
-// This function populates the second and third, and uses the first if it really needs to.
-func setRequestCancel(req *Request, rt RoundTripper, deadline time.Time) (stopTimer func(), didTimeout func() bool) {
-	if deadline.IsZero() {
-		return nop, alwaysFalse
-	}
-	knownTransport := knownRoundTripperImpl(rt, req)
-	oldCtx := req.Context()
-
-	if req.Cancel == nil && knownTransport {
-		// If they already had a Request.Context that's
-		// expiring sooner, do nothing:
-		if !timeBeforeContextDeadline(deadline, oldCtx) {
-			return nop, alwaysFalse
-		}
-
-		var cancelCtx func()
-		req.ctx, cancelCtx = context.WithDeadline(oldCtx, deadline)
-		return cancelCtx, func() bool { return time.Now().After(deadline) }
-	}
-	initialReqCancel := req.Cancel // the user's original Request.Cancel, if any
-
-	var cancelCtx func()
-	if timeBeforeContextDeadline(deadline, oldCtx) {
-		req.ctx, cancelCtx = context.WithDeadline(oldCtx, deadline)
-	}
-
-	cancel := make(chan struct{})
-	req.Cancel = cancel
-
-	doCancel := func() {
-		// The second way in the func comment above:
-		close(cancel)
-		// The first way, used only for RoundTripper
-		// implementations written before Go 1.5 or Go 1.6.
-		type canceler interface{ CancelRequest(*Request) }
-		if v, ok := rt.(canceler); ok {
-			v.CancelRequest(req)
-		}
-	}
-
-	stopTimerCh := make(chan struct{})
-	var once sync.Once
-	stopTimer = func() {
-		once.Do(func() {
-			close(stopTimerCh)
-			if cancelCtx != nil {
-				cancelCtx()
-			}
-		})
-	}
-
-	timer := time.NewTimer(time.Until(deadline))
-	var timedOut atomic.Bool
-
-	go func() {
-		select {
-		case <-initialReqCancel:
-			doCancel()
-			timer.Stop()
-		case <-timer.C:
-			timedOut.Store(true)
-			doCancel()
-		case <-stopTimerCh:
-			timer.Stop()
-		}
-	}()
-
-	return stopTimer, timedOut.Load
-}
-
-// timeBeforeContextDeadline reports whether the non-zero Time t is
-// before ctx's deadline, if any. If ctx does not have a deadline, it
-// always reports true (the deadline is considered infinite).
-func timeBeforeContextDeadline(t time.Time, ctx context.Context) bool {
-	d, ok := ctx.Deadline()
-	if !ok {
-		return true
-	}
-	return t.Before(d)
-}
-
-/*// knownRoundTripperImpl reports whether rt is a RoundTripper that's
-// maintained by the Go team and known to implement the latest
-// optional semantics (notably contexts). The Request is used
-// to check whether this particular request is using an alternate protocol,
-// in which case we need to check the RoundTripper for that protocol.
-func knownRoundTripperImpl(rt RoundTripper, req *Request) bool {
-	switch t := rt.(type) {
-	case *Transport:
-		if altRT := t.alternateRoundTripper(req); altRT != nil {
-			return knownRoundTripperImpl(altRT, req)
-		}
-		return true
-		//case *http2Transport, http2noDialH2RoundTripper:
-		//	return true
-	}
-	// There's a very minor chance of a false positive with this.
-	// Instead of detecting our golang.org/x/net/http2.Transport,
-	// it might detect a Transport type in a different http2
-	// package. But I know of none, and the only problem would be
-	// some temporarily leaked goroutines if the transport didn't
-	// support contexts. So this is a good enough heuristic:
-	if reflect.TypeOf(rt).String() == "*http2.Transport" {
-		return true
-	}
-	return false
-}*/
 
 // makeHeadersCopier makes a function that copies headers from the
 // initial Request, ireq. For every redirect, this function must be called

@@ -3,7 +3,7 @@ module github.com/goplus/llgoexamples
 go 1.20
 
 require (
-	github.com/goplus/llgo v0.9.7-0.20240830010153-2434fd778f0b
+	github.com/goplus/llgo v0.9.8-0.20240919105235-c6436ea6d196
 	golang.org/x/net v0.28.0
 )
 

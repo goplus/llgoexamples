@@ -81,13 +81,19 @@ func (r *Response) checkRespBody(taskData *taskData) (needContinue bool) {
 		select {
 		case taskData.resc <- responseAndError{res: r}:
 		case <-taskData.callerGone:
-			readLoopDefer(pc, true)
+			if debugSwitch {
+				println("############### checkRespBody callerGone")
+			}
+			closeAndRemoveIdleConn(pc, true)
 			return true
 		}
 		// Now that they've read from the unbuffered channel, they're safely
 		// out of the select that also waits on this goroutine to die, so
 		// we're allowed to exit now if needed (if alive is false)
-		readLoopDefer(pc, false)
+		if debugSwitch {
+			println("############### checkRespBody return")
+		}
+		closeAndRemoveIdleConn(pc, false)
 		return true
 	}
 	return false
@@ -97,6 +103,17 @@ func (r *Response) wrapRespBody(taskData *taskData) {
 	body := &bodyEOFSignal{
 		body: r.Body,
 		earlyCloseFn: func() error {
+			// If the response body is closed prematurely,
+			// the hyperBody needs to be recycled and the persistConn needs to be handled.
+			taskData.closeHyperBody()
+			select {
+			case <-taskData.pc.closech:
+				taskData.pc.t.removeIdleConn(taskData.pc)
+			default:
+			}
+			replaced := taskData.pc.t.replaceReqCanceler(taskData.req.cancelKey, nil) // before pc might return to idle pool
+			taskData.pc.alive = taskData.pc.alive &&
+				replaced && taskData.pc.tryPutIdleConn()
 			return nil
 		},
 		fn: func(err error) error {
@@ -110,7 +127,7 @@ func (r *Response) wrapRespBody(taskData *taskData) {
 		},
 	}
 	r.Body = body
-	// TODO(spongehah) gzip(wrapRespBody)
+	// TODO(hah) gzip(wrapRespBody): The compress/gzip library still has a bug. An exception occurs when calling gzip.NewReader().
 	//if taskData.addedGzip && EqualFold(r.Header.Get("Content-Encoding"), "gzip") {
 	//	println("gzip reader")
 	//	r.Body = &gzipReader{body: body}

@@ -28,7 +28,6 @@ type transferReader struct {
 	ContentLength int64
 	Chunked       bool
 	Close         bool
-	Trailer       Header
 }
 
 // parseTransferEncoding sets t.Chunked based on the Transfer-Encoding header.
@@ -150,10 +149,6 @@ func readTransfer(msg any, r io.ReadCloser) (err error) {
 	} else {
 		t.ContentLength = realLength
 	}
-
-	// TODO(spongehah) Trailer(readTransfer)
-	// Trailer
-	//t.Trailer, err = fixTrailer(t.Header, t.Chunked)
 
 	// If there is no Content-Length or chunked Transfer-Encoding on a *Response
 	// and the status is not 1xx, 204 or 304, then the body is unbounded.
@@ -301,48 +296,6 @@ func parseContentLength(cl string) (int64, error) {
 
 }
 
-// Parse the trailer header.
-func fixTrailer(header Header, chunked bool) (Header, error) {
-	vv, ok := header["Trailer"]
-	if !ok {
-		return nil, nil
-	}
-	if !chunked {
-		// Trailer and no chunking:
-		// this is an invalid use case for trailer header.
-		// Nevertheless, no error will be returned and we
-		// let users decide if this is a valid HTTP message.
-		// The Trailer header will be kept in Response.Header
-		// but not populate Response.Trailer.
-		// See issue #27197.
-		return nil, nil
-	}
-	header.Del("Trailer")
-
-	trailer := make(Header)
-	var err error
-	for _, v := range vv {
-		foreachHeaderElement(v, func(key string) {
-			key = CanonicalHeaderKey(key)
-			switch key {
-			case "Transfer-Encoding", "Trailer", "Content-Length":
-				if err == nil {
-					err = badStringError("bad trailer key", key)
-					return
-				}
-			}
-			trailer[key] = nil
-		})
-	}
-	if err != nil {
-		return nil, err
-	}
-	if len(trailer) == 0 {
-		return nil, nil
-	}
-	return trailer, nil
-}
-
 // body turns a Reader into a ReadCloser.
 // Close ensures that the body has been fully read
 // and then reads the trailer if necessary.
@@ -387,16 +340,6 @@ func (b *body) readLocked(p []byte) (n int, err error) {
 		b.sawEOF = true
 		// Chunked case. Read the trailer.
 		if b.hdr != nil {
-			// TODO(spongehah) Trailer(b.readLocked)
-			//if e := b.readTrailer(); e != nil {
-			//	err = e
-			//	// Something went wrong in the trailer, we must not allow any
-			//	// further reads of any kind to succeed from body, nor any
-			//	// subsequent requests on the server connection. See
-			//	// golang.org/issue/12027
-			//	b.sawEOF = false
-			//	b.closed = true
-			//}
 			b.hdr = nil
 		} else {
 			// If the server declared the Content-Length, our body is a LimitedReader
@@ -634,7 +577,6 @@ func (r *Request) writeHeader(reqHeaders *hyper.Headers) error {
 	// 'Content-Length' and 'Transfer-Encoding:chunked' are already handled by hyper
 
 	// Write Trailer header
-	// TODO(spongehah) Trailer(writeHeader)
 
 	return nil
 }
@@ -682,7 +624,7 @@ func (r *Request) writeBody(hyperReq *hyper.Request, treq *transportRequest) err
 			buf:  buf,
 			treq: treq,
 		}
-		hyperReqBody.SetUserdata(c.Pointer(reqData))
+		hyperReqBody.SetUserdata(c.Pointer(reqData), nil)
 		hyperReqBody.SetDataFunc(setPostData)
 		hyperReq.SetBody(hyperReqBody)
 	}

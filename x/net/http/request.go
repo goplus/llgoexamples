@@ -2,7 +2,6 @@ package http
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -31,20 +30,16 @@ type Request struct {
 	TransferEncoding []string
 	Close            bool
 	Host             string
-	//Form             url.Values
-	//PostForm         url.Values
-	//MultipartForm    *multipart.Form
-	Trailer    Header
+	// Form             url.Values
+	// PostForm         url.Values
+	// MultipartForm    *multipart.Form
 	RemoteAddr string
 	RequestURI string
-	//TLS              *tls.ConnectionState
-	Cancel <-chan struct{}
 
 	Response *Response
-	ctx      context.Context
 
 	deadline  time.Time
-	timeoutch chan struct{} //tmp timeout
+	timeoutch chan struct{}
 	timer     *libuv.Timer
 }
 
@@ -75,34 +70,8 @@ var reqWriteExcludeHeader = map[string]bool{
 type requestBodyReadError struct{ error }
 
 // NewRequest wraps NewRequestWithContext using context.Background.
-func NewRequest(method, url string, body io.Reader) (*Request, error) {
-	return NewRequestWithContext(context.Background(), method, url, body)
-}
-
-// NewRequestWithContext returns a new Request given a method, URL, and
-// optional body.
-//
-// If the provided body is also an io.Closer, the returned
-// Request.Body is set to body and will be closed by the Client
-// methods Do, Post, and PostForm, and Transport.RoundTrip.
-//
-// NewRequestWithContext returns a Request suitable for use with
-// Client.Do or Transport.RoundTrip. To create a request for use with
-// testing a Server Handler, either use the NewRequest function in the
-// net/http/httptest package, use ReadRequest, or manually update the
-// Request fields. For an outgoing client request, the context
-// controls the entire lifetime of a request and its response:
-// obtaining a connection, sending the request, and reading the
-// response headers and body. See the Request type's documentation for
-// the difference between inbound and outbound request fields.
-//
-// If body is of type *bytes.Buffer, *bytes.Reader, or
-// *strings.Reader, the returned request's ContentLength is set to its
-// exact value (instead of -1), GetBody is populated (so 307 and 308
-// redirects can replay the body), and Body is set to NoBody if the
-// ContentLength is 0.
-func NewRequestWithContext(ctx context.Context, method, urlStr string, body io.Reader) (*Request, error) {
-	// TODO(spongehah) Hyper only supports http
+func NewRequest(method, urlStr string, body io.Reader) (*Request, error) {
+	// TODO(hah) Hyper only supports http
 	isHttpPrefix := strings.HasPrefix(urlStr, "http://")
 	isHttpsPrefix := strings.HasPrefix(urlStr, "https://")
 	if !isHttpPrefix && !isHttpsPrefix {
@@ -121,9 +90,6 @@ func NewRequestWithContext(ctx context.Context, method, urlStr string, body io.R
 	if !validMethod(method) {
 		return nil, fmt.Errorf("net/http: invalid method %q", method)
 	}
-	if ctx == nil {
-		return nil, errors.New("net/http: nil Context")
-	}
 	u, err := url.Parse(urlStr)
 	if err != nil {
 		return nil, err
@@ -135,7 +101,6 @@ func NewRequestWithContext(ctx context.Context, method, urlStr string, body io.R
 	// The host's colon:port should be normalized. See Issue 14836.
 	u.Host = removeEmptyPort(u.Host)
 	req := &Request{
-		ctx:        ctx,
 		Method:     method,
 		URL:        u,
 		Proto:      "HTTP/1.1",
@@ -228,24 +193,6 @@ func (r *Request) isReplayable() bool {
 	return false
 }
 
-// Context returns the request's context. To change the context, use
-// Clone or WithContext.
-//
-// The returned context is always non-nil; it defaults to the
-// background context.
-//
-// For outgoing client requests, the context controls cancellation.
-//
-// For incoming server requests, the context is canceled when the
-// client's connection closes, the request is canceled (with HTTP/2),
-// or when the ServeHTTP method returns.
-func (r *Request) Context() context.Context {
-	if r.ctx != nil {
-		return r.ctx
-	}
-	return context.Background()
-}
-
 // AddCookie adds a cookie to the request. Per RFC 6265 section 5.4,
 // AddCookie does not attach more than one Cookie header field. That
 // means all cookies, if any, are written into the same line,
@@ -300,7 +247,11 @@ func (r *Request) write(client *hyper.ClientConn, taskData *taskData, exec *hype
 	}
 	// Send it!
 	sendTask := client.Send(hyperReq)
-	sendTask.SetUserdata(c.Pointer(taskData))
+	if sendTask == nil {
+		println("############### write: sendTask is nil")
+		return errors.New("failed to send the request")
+	}
+	sendTask.SetUserdata(c.Pointer(taskData), nil)
 	sendRes := exec.Push(sendTask)
 	if sendRes != hyper.OK {
 		err = errors.New("failed to send the request")
@@ -424,7 +375,7 @@ func (r *Request) newHyperRequest(usingProxy bool, extraHeader Header, treq *tra
 
 	// Wait for 100-continue if expected.
 	if r.ProtoAtLeast(1, 1) && r.Body != nil && r.expectsContinue() {
-		hyperReq.OnInformational(printInformational, nil)
+		hyperReq.OnInformational(printInformational, nil, nil)
 	}
 
 	// Write body and trailer

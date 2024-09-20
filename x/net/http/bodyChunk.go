@@ -2,31 +2,23 @@ package http
 
 import (
 	"errors"
-	"io"
-	"sync"
 
 	"github.com/goplus/llgo/c/libuv"
 )
 
-type onceError struct {
-	sync.Mutex
-	err error
+type bodyChunk struct {
+	chunk       []byte
+	readCh      chan []byte
+	asyncHandle *libuv.Async
+
+	done chan struct{}
+
+	rerr error
 }
 
-func (a *onceError) Store(err error) {
-	a.Lock()
-	defer a.Unlock()
-	if a.err != nil {
-		return
-	}
-	a.err = err
-}
-
-func (a *onceError) Load() error {
-	a.Lock()
-	defer a.Unlock()
-	return a.err
-}
+var (
+	errClosedBodyChunk = errors.New("bodyChunk: read/write on closed body")
+)
 
 func newBodyChunk(asyncHandle *libuv.Async) *bodyChunk {
 	return &bodyChunk{
@@ -36,39 +28,23 @@ func newBodyChunk(asyncHandle *libuv.Async) *bodyChunk {
 	}
 }
 
-type bodyChunk struct {
-	chunk       []byte
-	readCh      chan []byte
-	asyncHandle *libuv.Async
-
-	once sync.Once
-	done chan struct{}
-
-	rerr onceError
-}
-
-var (
-	errClosedBodyChunk = errors.New("bodyChunk: read/write on closed body")
-)
-
 func (bc *bodyChunk) Read(p []byte) (n int, err error) {
+	select {
+	case <-bc.done:
+		err = bc.readCloseError()
+		return
+	default:
+	}
+
 	for n < len(p) {
 		if len(bc.chunk) == 0 {
+			bc.asyncHandle.Send()
 			select {
-			case chunk, ok := <-bc.readCh:
-				if !ok {
-					if n > 0 {
-						return n, nil
-					}
-					return 0, bc.readCloseError()
-				}
+			case chunk := <-bc.readCh:
 				bc.chunk = chunk
-				bc.asyncHandle.Send()
 			case <-bc.done:
-				if n > 0 {
-					return n, nil
-				}
-				return 0, io.EOF
+				err = bc.readCloseError()
+				return
 			}
 		}
 
@@ -77,28 +53,28 @@ func (bc *bodyChunk) Read(p []byte) (n int, err error) {
 		bc.chunk = bc.chunk[copied:]
 	}
 
-	return n, nil
+	return
 }
 
 func (bc *bodyChunk) Close() error {
-	return bc.closeRead(nil)
+	return bc.closeWithError(nil)
 }
 
 func (bc *bodyChunk) readCloseError() error {
-	if rerr := bc.rerr.Load(); rerr != nil {
+	if rerr := bc.rerr; rerr != nil {
 		return rerr
 	}
 	return errClosedBodyChunk
 }
 
-func (bc *bodyChunk) closeRead(err error) error {
-	if err == nil {
-		err = io.EOF
+func (bc *bodyChunk) closeWithError(err error) error {
+	if bc.rerr != nil {
+		return nil
 	}
-	bc.rerr.Store(err)
-	bc.once.Do(func() {
-		close(bc.done)
-	})
-	//close(bc.done)
+	if err == nil {
+		err = errClosedBodyChunk
+	}
+	bc.rerr = err
+	close(bc.done)
 	return nil
 }
