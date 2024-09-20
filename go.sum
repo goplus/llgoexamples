@@ -1,8 +1,6 @@
-github.com/goplus/llgo v0.9.0 h1:yaJzQperGUafEaHc9VlVQVskIngacoTNweEXY0GRi0Q=
-github.com/goplus/llgo v0.9.0/go.mod h1:M3UwiYdPZFyx7m2J0+6Ti1dYVA3uOO1WvSBocuE8N7M=
-github.com/goplus/llgo v0.9.1-0.20240709104849-d6a38a567fda h1:UIPwlgzCb8dV/7WFMyprhZuq8CSLAQIqwFpH5AhrNOM=
-github.com/goplus/llgo v0.9.1-0.20240709104849-d6a38a567fda/go.mod h1:zsrtWZapL4aklZc99xBSZRynGzLTIT1mLRjP0VSn9iw=
-github.com/goplus/llgo v0.9.1-0.20240712060421-858d38d314a3 h1:2fZ2zQ8S58KvOsJTx6s6MHoi6n1K4sqQwIbTauMrgEE=
-github.com/goplus/llgo v0.9.1-0.20240712060421-858d38d314a3/go.mod h1:zsrtWZapL4aklZc99xBSZRynGzLTIT1mLRjP0VSn9iw=
-github.com/goplus/llgo v0.9.3-0.20240726020431-98d075728f2b h1:z9FUoeAALL5ytBhhGhE1dXm4+L1Q2eMUTcfiqLAZgf8=
-github.com/goplus/llgo v0.9.3-0.20240726020431-98d075728f2b/go.mod h1:zsrtWZapL4aklZc99xBSZRynGzLTIT1mLRjP0VSn9iw=
+github.com/goplus/llgo v0.9.8-0.20240919105235-c6436ea6d196 h1:LckJktvgChf3x0eex+GT//JkYRj1uiT4uMLzyrg3ChU=
+github.com/goplus/llgo v0.9.8-0.20240919105235-c6436ea6d196/go.mod h1:5Fs+08NslqofJ7xtOiIXugkurYOoQvY02ZkFNWA1uEI=
+golang.org/x/net v0.28.0 h1:a9JDOJc5GMUJ0+UDqmLT86WiEy7iWyIhz8gz8E4e5hE=
+golang.org/x/net v0.28.0/go.mod h1:yqtgsTWOOnlGLG9GFRrK3++bGOUEkNBoHZc8MEDWPNg=
+golang.org/x/text v0.17.0 h1:XtiM5bkSOt+ewxlOE/aE/AKEHibwj/6gvWMl9Rsh0Qc=
+golang.org/x/text v0.17.0/go.mod h1:BuEKDfySbSR4drPmRPG/7iBdf8hvFMuRexcpahXilzY=
