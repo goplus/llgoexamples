@@ -6,7 +6,7 @@ import (
 
 	"github.com/goplus/llgo/c"
 	"github.com/goplus/llgo/c/os"
-	"github.com/goplus/llgo/rust/hyper"
+	"github.com/goplus/llgoexamples/rust/hyper"
 )
 
 type response struct {

@@ -14,18 +14,24 @@ import (
 	cnet "github.com/goplus/llgo/c/net"
 	cos "github.com/goplus/llgo/c/os"
 	"github.com/goplus/llgo/c/syscall"
-	"github.com/goplus/llgo/rust/hyper"
-	"github.com/goplus/llgo/x/net"
+	"github.com/goplus/llgoexamples/rust/hyper"
+	"github.com/goplus/llgoexamples/x/net"
 )
+
+// maxPostHandlerReadBytes is the max number of Request.Body bytes not
+// consumed by a handler that the server will read from the client
+// in order to keep a connection alive. If there are more bytes than
+// this then the server to be paranoid instead sends a "Connection:
+// close" response.
+//
+// This number is approximately what a typical machine's TCP buffer
+// size is anyway.  (if we have the bytes on the machine, we might as
+// well read them)
+const maxPostHandlerReadBytes = 256 << 10
 
 const _SC_NPROCESSORS_ONLN c.Int = 58
 var cpuCount int
 
-var asyncHandleMapMu sync.Mutex
-var asyncHandleMap = make(map[int64]*libuv.Async)
-
-// connID is used to generate unique IDs for each connection
-var connID int64
 
 type Handler interface {
 	ServeHTTP(ResponseWriter, *Request)
@@ -60,7 +66,6 @@ type eventLoop struct {
 }
 
 type conn struct {
-	asyncID       int64
 	stream        libuv.Tcp
 	pollHandle    libuv.Poll
 	eventMask     c.Uint
@@ -72,9 +77,9 @@ type conn struct {
 }
 
 type serviceUserdata struct {
-	asyncHandleID c.Long
-	host          [128]c.Char
-	port          [8]c.Char
+	asyncHandle *libuv.Async
+	host        [128]c.Char
+	port        [8]c.Char
 	executor      *hyper.Executor
 }
 
@@ -195,7 +200,6 @@ func ListenAndServe(addr string, handler Handler) error {
 }
 
 func (srv *Server) ListenAndServe() error {
-	connID = 0
 	cpuCount = int(c.Sysconf(_SC_NPROCESSORS_ONLN))
 	if cpuCount <= 0 {
 		cpuCount = 4
@@ -220,17 +224,6 @@ func (srv *Server) ListenAndServe() error {
 	if err != nil {
 		return fmt.Errorf("invalid port number: %v", err)
 	}
-
-	//TODO(hackerchai): new logic for poll
-	// go func() {
-	// 	for {
-	// 		task := el.executor.Poll()
-	// 		if task != nil {
-	// 			handleTask(task)
-	// 			task = el.executor.Poll()
-	// 		}
-	// 	}
-	// }()
 
 	errChan := make(chan error, len(srv.eventLoop))
 	var wg sync.WaitGroup
@@ -260,7 +253,7 @@ func HandleFunc(pattern string, handler func(ResponseWriter, *Request)) {
 func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 	fmt.Println("[debug] onNewConnection called")
 	if status < 0 {
-		fmt.Printf("New connection error: %s\n", libuv.Strerror(libuv.Errno(status)))
+		fmt.Printf("New connection error: %s\n", c.GoString(libuv.Strerror(libuv.Errno(status))))
 		return
 	}
 
@@ -280,11 +273,6 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 
 	requestNotifyHandle := &libuv.Async{}
 	el.uvLoop.Async(requestNotifyHandle, onAsync)
-	fmt.Println("[debug] async handle created")
-	asyncHandleMapMu.Lock()
-	asyncHandleMap[conn.asyncID] = requestNotifyHandle
-	asyncHandleMapMu.Unlock()
-	fmt.Println("[debug] async handle added to map")
 
 	libuv.InitTcp(el.uvLoop, &conn.stream)
 	conn.stream.Data = unsafe.Pointer(conn)
@@ -306,7 +294,7 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 		}
 
 		userData.executor = el.executor
-		userData.asyncHandleID = c.Long(conn.asyncID)
+		userData.asyncHandle = requestNotifyHandle
 
 		var addr cnet.SockaddrStorage
 		addrlen := c.Int(unsafe.Sizeof(addr))
@@ -345,7 +333,7 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 
 		io := createIo(conn)
 		service := hyper.ServiceNew(serverCallback)
-		service.SetUserdata(unsafe.Pointer(userData), nil)
+		service.SetUserdata(unsafe.Pointer(userData), freeServiceUserdata)
 
 		serverConn := hyper.ServeHttpXConnection(el.http1Opts, el.http2Opts, io, service)
 		el.executor.Push(serverConn)
@@ -391,12 +379,7 @@ func onIdle(handle *libuv.Idle) {
 	}
 }
 
-func doNothing(handle *libuv.Idle) {
-	return
-}
-
 func serverCallback(userData unsafe.Pointer, hyperReq *hyper.Request, channel *hyper.ResponseChannel) {
-
 	payload := (*serviceUserdata)(userData)
 	if payload == nil {
 		fmt.Fprintf(os.Stderr, "Error: Received null userData\n")
@@ -406,32 +389,20 @@ func serverCallback(userData unsafe.Pointer, hyperReq *hyper.Request, channel *h
 	executor := payload.executor
 	if executor == nil {
 		fmt.Fprintf(os.Stderr, "Error: Received null executor\n")
-		fmt.Printf("[debug] host: %s\n", c.GoString(&payload.host[0]))
-		fmt.Printf("[debug] port: %s\n", c.GoString(&payload.port[0]))
+		return
+	}
+
+	requestNotifyHandle := payload.asyncHandle
+	if requestNotifyHandle == nil {
+		fmt.Fprintf(os.Stderr, "Error: Received null asyncHandle\n")
 		return
 	}
 
 	host := payload.host
 	port := payload.port
 
-	if payload.asyncHandleID == 0 {
-		fmt.Fprintf(os.Stderr, "Error: Received null asyncHandleID\n")
-		return
-	}
-	connID := int64(payload.asyncHandleID)
-
-
-
 	if hyperReq == nil {
 		fmt.Fprintf(os.Stderr, "Error: Received null request\n")
-		return
-	}
-
-	asyncHandleMapMu.Lock()
-	requestNotifyHandle, ok := asyncHandleMap[connID]
-	asyncHandleMapMu.Unlock()
-	if !ok {
-		fmt.Println("[debug] requestNotifyHandle not found")
 		return
 	}
 
@@ -447,21 +418,16 @@ func serverCallback(userData unsafe.Pointer, hyperReq *hyper.Request, channel *h
 	res := newResponse(channel)
 	fmt.Println("[debug] Response created")
 
-	//TODO(hackerchai): replace with no goroutine
+	//TODO(hackerchai): replace with goroutine to enable blocking operation in handler
 	fmt.Println("[debug] Serving HTTP")
 	DefaultServeMux.ServeHTTP(res, req)
-	//srv.Handler.ServeHTTP(res, req)
 	fmt.Println("[debug] Response finalizing")
 	res.finalize()
 	fmt.Println("[debug] Response finalized")
 
 	// go func() {
-	// 	fmt.Println("[debug] Serving HTTP")
 	// 	DefaultServeMux.ServeHTTP(res, req)
-	// 	//srv.Handler.ServeHTTP(res, req)
-	// 	fmt.Println("[debug] Response finalizing")
 	// 	res.finalize()
-	// 	fmt.Println("[debug] Response finalized")
 	// }()
 }
 
@@ -594,11 +560,18 @@ func createIo(conn *conn) *hyper.Io {
 }
 
 func createServiceUserdata() *serviceUserdata {
-	userdata := &serviceUserdata{}
+	userdata := (*serviceUserdata)(c.Calloc(1, unsafe.Sizeof(serviceUserdata{})))
 	if userdata == nil {
 		fmt.Fprintf(os.Stderr, "Failed to allocate service_userdata\n")
 	}
 	return userdata
+}
+
+func freeServiceUserdata(userdata c.Pointer) {
+	castUserdata := (*serviceUserdata)(userdata)
+	if castUserdata != nil {
+		c.Free(c.Pointer(castUserdata))
+	}
 }
 
 func readCb(userdata unsafe.Pointer, ctx *hyper.Context, buf *byte, bufLen uintptr) uintptr {
@@ -662,7 +635,7 @@ func onPoll(handle *libuv.Poll, status c.Int, events c.Int) {
 	conn := (*conn)((*libuv.Handle)(unsafe.Pointer(handle)).GetData())
 
 	if status < 0 {
-		fmt.Fprintf(os.Stderr, "Poll error: %s\n", libuv.Strerror(libuv.Errno(status)))
+		fmt.Fprintf(os.Stderr, "Poll error: %s\n", c.GoString(libuv.Strerror(libuv.Errno(status))))
 		return
 	}
 
@@ -709,7 +682,6 @@ func createConnData() (*conn, error) {
 	}
 	conn.isClosing.Store(false)
 	conn.closedHandles = 0
-	conn.asyncID = conn.asyncID + 1
 
 	return conn, nil
 }
@@ -791,12 +763,6 @@ func (c *conn) Close() {
 
 		if (*libuv.Handle)(unsafe.Pointer(&c.stream)).IsClosing() == 0 {
 			(*libuv.Handle)(unsafe.Pointer(&c.stream)).Close(nil)
-		}
-
-		if asyncHandleMap[c.asyncID] != nil {
-			asyncHandleMapMu.Lock()
-			delete(asyncHandleMap, c.asyncID)
-			asyncHandleMapMu.Unlock()
 		}
 	}
 }

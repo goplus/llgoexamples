@@ -1,5 +1,20 @@
 package net
 
+// JoinHostPort combines host and port into a network address of the
+// form "host:port". If host contains a colon, as found in literal
+// IPv6 addresses, then JoinHostPort returns "[host]:port".
+//
+// See func Dial for a description of the host and port parameters.
+func JoinHostPort(host, port string) string {
+	// We assume that host is a literal IPv6 address if host has
+	// colons.
+
+	if IndexByteString(host, ':') >= 0 {
+		return "[" + host + "]:" + port
+	}
+	return host + ":" + port
+}
+
 // SplitHostPort splits a network address of the form "host:port",
 // "host%zone:port", "[host]:port" or "[host%zone]:port" into host or
 // host%zone and port.
@@ -20,7 +35,7 @@ func SplitHostPort(hostport string) (host, port string, err error) {
 	j, k := 0, 0
 
 	// The port starts after the last colon.
-	i := LastIndexByteString(hostport, ':')
+	i := last(hostport, ':')
 	if i < 0 {
 		return addrErr(hostport, missingPort)
 	}

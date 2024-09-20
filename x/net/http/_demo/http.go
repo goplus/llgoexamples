@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/goplus/llgo/x/net/http"
+	"github.com/goplus/llgoexamples/x/net/http"
 )
 
 func echoHandler(w http.ResponseWriter, r *http.Request) {
@@ -17,6 +17,10 @@ func echoHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf(">> URL: %s\n", r.URL.String())
 	fmt.Printf(">> RemoteAddr: %s\n", r.RemoteAddr)
 
+	w.Header().Set("Content-Type", "text/plain")
+	w.Write([]byte("Hello, World!"))
+
+	//TODO(hackerchai): temporarily unable to do blocking operation in handler due to imperfections of goroutine
 	// body, err := io.ReadAll(r.Body)
 	// if err != nil {
 	// 	http.Error(w, "Error reading request body", http.StatusInternalServerError)
@@ -27,8 +31,6 @@ func echoHandler(w http.ResponseWriter, r *http.Request) {
 
 	// w.Header().Set("Content-Type", "text/plain")
 	// w.Write(body)
-	w.Header().Set("Content-Type", "text/plain")
-	w.Write([]byte("Hello, World!"))
 }
 
 func main() {

@@ -4,15 +4,14 @@ import (
 	"fmt"
 	"io"
 
-	//"mime/multipart"
 	"net/url"
 	"strings"
 	"time"
 	"unsafe"
 
 	"github.com/goplus/llgo/c"
-	"github.com/goplus/llgo/rust/hyper"
 	"github.com/goplus/llgo/c/libuv"
+	"github.com/goplus/llgoexamples/rust/hyper"
 )
 
 type Request struct {
@@ -33,14 +32,18 @@ type Request struct {
 	// MultipartForm    *multipart.Form
 	RemoteAddr string
 	RequestURI string
-	timeout    time.Duration
+
+	Response *Response
+
+	deadline  time.Time
+	timeoutch chan struct{}
+	timer     *libuv.Timer
 }
 
 func readRequest(executor *hyper.Executor, hyperReq *hyper.Request, requestNotifyHandle *libuv.Async, remoteAddr string) (*Request, error) {
 	println("[debug] readRequest called")
 	req := Request{
 		Header:  make(Header),
-		timeout: 0,
 		Body:    nil,
 	}
 	req.RemoteAddr = remoteAddr
@@ -136,7 +139,6 @@ func readRequest(executor *hyper.Executor, hyperReq *hyper.Request, requestNotif
 
 	body := hyperReq.Body()
 	if body != nil {
-		//task := body.Data()
 		taskFlag := getBodyTask
 
 		requestBody := newRequestBody(requestNotifyHandle)
