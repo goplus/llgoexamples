@@ -239,18 +239,12 @@ func (r *Response) checkRespBody(taskData *clientTaskData) (needContinue bool) {
 		select {
 		case taskData.resc <- responseAndError{res: r}:
 		case <-taskData.callerGone:
-			if debugSwitch {
-				println("############### checkRespBody callerGone")
-			}
 			closeAndRemoveIdleConn(pc, true)
 			return true
 		}
 		// Now that they've read from the unbuffered channel, they're safely
 		// out of the select that also waits on this goroutine to die, so
 		// we're allowed to exit now if needed (if alive is false)
-		if debugSwitch {
-			println("############### checkRespBody return")
-		}
 		closeAndRemoveIdleConn(pc, false)
 		return true
 	}

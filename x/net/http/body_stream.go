@@ -2,7 +2,6 @@ package http
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/goplus/llgo/c/libuv"
 )
@@ -18,7 +17,7 @@ type bodyStream struct {
 }
 
 var (
-	ErrClosedRequestBody = errors.New("request body: read/write on closed body")
+	ErrClosedBodyStream = errors.New("body stream: read/write on closed body")
 )
 
 func newBodyStream(asyncHandle *libuv.Async) *bodyStream {
@@ -30,7 +29,6 @@ func newBodyStream(asyncHandle *libuv.Async) *bodyStream {
 }
 
 func (rb *bodyStream) Read(p []byte) (n int, err error) {
-	fmt.Println("[debug] RequestBody Read called")
 	select {
 	case <-rb.done:
 		err = rb.readCloseError()
@@ -41,11 +39,9 @@ func (rb *bodyStream) Read(p []byte) (n int, err error) {
 	for n < len(p) {
 		if len(rb.chunk) == 0 {
 			rb.asyncHandle.Send()
-			fmt.Println("[debug] RequestBody Read asyncHandle.Send called")
 			select {
 			case chunk := <-rb.readCh:
 				rb.chunk = chunk
-				fmt.Println("[debug] RequestBody Read chunk received")
 			case <-rb.done:
 				err = rb.readCloseError()
 				return
@@ -64,16 +60,15 @@ func (rb *bodyStream) readCloseError() error {
 	if rerr := rb.rerr; rerr != nil {
 		return rerr
 	}
-	return ErrClosedRequestBody
+	return ErrClosedBodyStream
 }
 
 func (rb *bodyStream) closeWithError(err error) error {
-	fmt.Println("[debug] RequestBody closeRead called")
 	if rb.rerr != nil {
 		return nil
 	}
 	if err == nil {
-		err = ErrClosedRequestBody
+		err = ErrClosedBodyStream
 	}
 	rb.rerr = err
 	close(rb.done)
