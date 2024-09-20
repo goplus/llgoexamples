@@ -3,11 +3,10 @@ package main
 import (
 	"fmt"
 
-	"github.com/goplus/llgo/x/net/http"
+	"github.com/goplus/llgoexamples/x/net/http"
 )
 
 func echoHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Printf("[debug] echoHandler called\n")
 	fmt.Printf(">> %s %s HTTP/%d.%d\n", r.Method, r.RequestURI, r.ProtoMajor, r.ProtoMinor)
 	for key, values := range r.Header {
 		for _, value := range values {

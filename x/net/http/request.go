@@ -489,14 +489,15 @@ func valueOrDefault(value, def string) string {
 	return def
 }
 
+// readRequest reads the request from the hyper request
 func readRequest(executor *hyper.Executor, hyperReq *hyper.Request, requestNotifyHandle *libuv.Async, remoteAddr string) (*Request, error) {
-	println("[debug] readRequest called")
 	req := Request{
 		Header: make(Header),
 		Body:   nil,
 	}
 	req.RemoteAddr = remoteAddr
 
+	//get the request headers
 	headers := hyperReq.Headers()
 	if headers != nil {
 		headers.Foreach(addHeader, unsafe.Pointer(&req))
@@ -504,6 +505,7 @@ func readRequest(executor *hyper.Executor, hyperReq *hyper.Request, requestNotif
 		return nil, fmt.Errorf("failed to get request headers")
 	}
 
+	//get the host from the request header
 	var host string
 	for key, values := range req.Header {
 		if strings.EqualFold(key, "Host") {
@@ -537,12 +539,14 @@ func readRequest(executor *hyper.Executor, hyperReq *hyper.Request, requestNotif
 		schemeStr = string(scheme[:schemeLen])
 	}
 
+	//if authority is empty, use the host from the request header
 	if authorityLen == 0 {
 		authorityStr = host
 	} else {
 		authorityStr = string(authority[:authorityLen])
 	}
 
+	//if path and query is empty, use the path and query from the request header
 	if pathAndQueryLen == 0 {
 		return nil, fmt.Errorf("failed to get URI path and query: %v", uriResult)
 	} else {
@@ -593,7 +597,8 @@ func readRequest(executor *hyper.Executor, hyperReq *hyper.Request, requestNotif
 		bodyStream := newBodyStream(requestNotifyHandle)
 		req.Body = bodyStream
 
-		taskData := taskData{
+		//prepare task data for hyper executor
+		taskData := serverTaskData{
 			hyperBody:    body,
 			responseBody: nil,
 			bodyStream:   bodyStream,
@@ -601,8 +606,8 @@ func readRequest(executor *hyper.Executor, hyperReq *hyper.Request, requestNotif
 			executor:     executor,
 		}
 
+		//set task data to the request notify async handle
 		requestNotifyHandle.SetData(c.Pointer(&taskData))
-		fmt.Println("[debug] async task set")
 
 	} else {
 		return nil, fmt.Errorf("failed to get request body")
@@ -613,6 +618,7 @@ func readRequest(executor *hyper.Executor, hyperReq *hyper.Request, requestNotif
 	return &req, nil
 }
 
+// addHeader callback function to add the header to the request
 func addHeader(data unsafe.Pointer, name *byte, nameLen uintptr, value *byte, valueLen uintptr) c.Int {
 	req := (*Request)(data)
 	key := string(unsafe.Slice(name, nameLen))

@@ -1,15 +1,16 @@
 package http
 
 import (
-	"fmt"
 	"sync"
 )
 
+// ServeMux is a HTTP request multiplexer
 type ServeMux struct {
 	mu sync.RWMutex
 	m  map[string]muxEntry
 }
 
+// muxEntry is a HTTP request multiplexer entry
 type muxEntry struct {
 	h       Handler
 	pattern string
@@ -19,22 +20,15 @@ type muxEntry struct {
 var DefaultServeMux = &ServeMux{m: make(map[string]muxEntry)}
 
 func (mux *ServeMux) ServeHTTP(w ResponseWriter, r *Request) {
-	fmt.Printf("[debug] ServeHTTP called\n")
-	// NotFoundHandler().ServeHTTP(w, r)
-	// return
-	h, pattern := mux.Handler(r)
-	fmt.Printf("[debug] Handler found for pattern: %s\n", pattern)
+	h, _ := mux.Handler(r)
 	h.ServeHTTP(w, r)
 }
 
+// Handler returns the handler to use for the given request, consulting r.Method, r.Host, and r.URL.Path.
+// It always returns a non-nil handler.
 func (mux *ServeMux) Handler(r *Request) (h Handler, pattern string) {
-	fmt.Printf("[debug] Mux Handler called\n")
 	mux.mu.RLock()
 	defer mux.mu.RUnlock()
-	if r.URL == nil {
-		fmt.Println("[debug] r.URL is nil")
-	}
-	fmt.Printf("[debug] Handler called: r.URL.Path = %s\n", r.URL.Path)
 
 	h, pattern = mux.m[r.URL.Path].h, r.URL.Path
 	if h == nil {
@@ -43,10 +37,12 @@ func (mux *ServeMux) Handler(r *Request) (h Handler, pattern string) {
 	return
 }
 
+// HandleFunc registers the handler for the given pattern.
 func (mux *ServeMux) HandleFunc(pattern string, handler func(ResponseWriter, *Request)) {
 	mux.Handle(pattern, HandlerFunc(handler))
 }
 
+// Handle registers the handler for the given pattern using the default ServeMux.
 func (mux *ServeMux) Handle(pattern string, handler Handler) {
 	mux.mu.Lock()
 	defer mux.mu.Unlock()
