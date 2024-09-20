@@ -29,9 +29,14 @@ import (
 // well read them)
 const maxPostHandlerReadBytes = 256 << 10
 
+// _SC_NPROCESSORS_ONLN is the number of processors on the system
 const _SC_NPROCESSORS_ONLN c.Int = 58
-var cpuCount int
 
+// DefaultChunkSize is the default chunk size for reading and writing data
+var DefaultChunkSize uintptr = 8192
+
+// cpuCount is the number of processors on the system
+var cpuCount int
 
 type Handler interface {
 	ServeHTTP(ResponseWriter, *Request)
@@ -44,8 +49,8 @@ type ResponseWriter interface {
 }
 
 type Server struct {
-	Addr    string
-	Handler Handler
+	Addr       string
+	Handler    Handler
 	isShutdown atomic.Bool
 
 	eventLoop []*eventLoop
@@ -80,7 +85,7 @@ type serviceUserdata struct {
 	asyncHandle *libuv.Async
 	host        [128]c.Char
 	port        [8]c.Char
-	executor      *hyper.Executor
+	executor    *hyper.Executor
 }
 
 func NewServer(addr string) *Server {
@@ -130,7 +135,7 @@ func newEventLoop() (*eventLoop, error) {
 	el.uvLoop.SetData(unsafe.Pointer(el))
 
 	if r := libuv.InitTcpEx(el.uvLoop, &el.uvServer, cnet.AF_INET); r != 0 {
-		return nil, fmt.Errorf("failed to init TCP: %v", libuv.Strerror(libuv.Errno(r)))
+		return nil, fmt.Errorf("failed to init TCP: %s", c.GoString(libuv.Strerror(libuv.Errno(r))))
 	}
 
 	return el, nil
@@ -139,19 +144,19 @@ func newEventLoop() (*eventLoop, error) {
 func (el *eventLoop) run(host string, port int) error {
 	var sockaddr cnet.SockaddrIn
 	if r := libuv.Ip4Addr(c.AllocaCStr(host), c.Int(port), &sockaddr); r != 0 {
-		return fmt.Errorf("failed to create IP address: %v", libuv.Strerror(libuv.Errno(r)))
+		return fmt.Errorf("failed to create IP address: %s", c.GoString(libuv.Strerror(libuv.Errno(r))))
 	}
 
 	if err := setReuseAddr(&el.uvServer); err != nil {
-		return fmt.Errorf("failed to set SO_REUSEADDR: %v", err)
+		return fmt.Errorf("failed to set SO_REUSEADDR: %s", err)
 	}
 
 	if r := el.uvServer.Bind((*cnet.SockAddr)(unsafe.Pointer(&sockaddr)), 0); r != 0 {
-		return fmt.Errorf("failed to bind: %v", libuv.Strerror(libuv.Errno(r)))
+		return fmt.Errorf("failed to bind: %s", c.GoString(libuv.Strerror(libuv.Errno(r))))
 	}
 
-	if err := (*libuv.Stream)(&el.uvServer).Listen(128, onNewConnection); err != 0 {
-		return fmt.Errorf("failed to listen: %v", err)
+	if r := (*libuv.Stream)(&el.uvServer).Listen(128, onNewConnection); r != 0 {
+		return fmt.Errorf("failed to listen: %s", c.GoString(libuv.Strerror(libuv.Errno(r))))
 	}
 
 	if r := libuv.InitIdle(el.uvLoop, &el.idleHandle); r != 0 {
@@ -314,7 +319,7 @@ func onNewConnection(serverStream *libuv.Stream, status c.Int) {
 
 		r := libuv.PollInit(el.uvLoop, &conn.pollHandle, libuv.OsFd(conn.stream.GetIoWatcherFd()))
 		if r < 0 {
-			fmt.Fprintf(os.Stderr, "uv_poll_init error: %s\n", libuv.Strerror(libuv.Errno(r)))
+			fmt.Fprintf(os.Stderr, "uv_poll_init error: %s\n", c.GoString(libuv.Strerror(libuv.Errno(r))))
 			(*libuv.Handle)(unsafe.Pointer(&conn.stream)).Close(nil)
 			return
 		}
@@ -482,8 +487,8 @@ func handleGetBodyTask(hyperTaskType hyper.TaskReturnType, task *hyper.Task, pay
 		handleTaskBuffer(task, payload)
 	case hyper.TaskEmpty:
 		fmt.Println("[debug] Get body task closing request body")
-		if payload.requestBody != nil {
-			payload.requestBody.Close()
+		if payload.bodyStream != nil {
+			payload.bodyStream.Close()
 		}
 		task.Free()
 	}
@@ -513,7 +518,7 @@ func handleTaskError(task *hyper.Task) {
 func handleTaskBuffer(task *hyper.Task, payload *taskData) {
 	buf := (*hyper.Buf)(task.Value())
 	bytes := unsafe.Slice(buf.Bytes(), buf.Len())
-	payload.requestBody.readCh <- bytes
+	payload.bodyStream.readCh <- bytes
 	fmt.Printf("[debug] Task get body writing to bodyWriter: %s\n", string(bytes))
 	buf.Free()
 	task.Free()
@@ -669,7 +674,7 @@ func updateConnRegistrations(conn *conn) bool {
 	fmt.Printf("[debug] Starting poll with events: %d\n", events)
 	r := conn.pollHandle.Start(events, onPoll)
 	if r < 0 {
-		fmt.Fprintf(os.Stderr, "uv_poll_start error: %s\n", libuv.Strerror(libuv.Errno(r)))
+		fmt.Fprintf(os.Stderr, "uv_poll_start error: %s\n", c.GoString(libuv.Strerror(libuv.Errno(r))))
 		return false
 	}
 	return true

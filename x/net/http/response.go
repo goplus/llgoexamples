@@ -32,7 +32,7 @@ type responseBodyRaw struct {
 type taskData struct {
 	hyperBody    *hyper.Body
 	responseBody *responseBodyRaw
-	requestBody  *requestBody
+	bodyStream   *bodyStream
 	executor     *hyper.Executor
 	taskFlag     taskFlag
 }
@@ -43,8 +43,6 @@ const (
 	setBodyTask taskFlag = iota
 	getBodyTask
 )
-
-var DefaultChunkSize uintptr = 8192
 
 func newResponse(hyperChannel *hyper.ResponseChannel) *response {
 	fmt.Printf("[debug] newResponse called\n")
@@ -136,7 +134,7 @@ func (r *response) finalize() error {
 	taskData := &taskData{
 		hyperBody:    body,
 		responseBody: &bodyData,
-		requestBody:  nil,
+		bodyStream:   nil,
 		executor:     nil,
 		taskFlag:     setBodyTask,
 	}
@@ -194,7 +192,6 @@ func setBodyDataFunc(userdata c.Pointer, ctx *hyper.Context, chunk **hyper.Buf) 
 	return hyper.PollError
 }
 
-
 type Response struct {
 	Status           string // e.g. "200 OK"
 	StatusCode       int    // e.g. 200
@@ -234,7 +231,7 @@ func (r *Response) Cookies() []*Cookie {
 	return readSetCookies(r.Header)
 }
 
-func (r *Response) checkRespBody(taskData *taskData) (needContinue bool) {
+func (r *Response) checkRespBody(taskData *clientTaskData) (needContinue bool) {
 	pc := taskData.pc
 	bodyWritable := r.bodyIsWritable()
 	hasBody := taskData.req.Method != "HEAD" && r.ContentLength != 0
@@ -282,7 +279,7 @@ func (r *Response) checkRespBody(taskData *taskData) (needContinue bool) {
 	return false
 }
 
-func (r *Response) wrapRespBody(taskData *taskData) {
+func (r *Response) wrapRespBody(taskData *clientTaskData) {
 	body := &bodyEOFSignal{
 		body: r.Body,
 		earlyCloseFn: func() error {

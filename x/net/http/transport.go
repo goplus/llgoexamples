@@ -36,7 +36,6 @@ var DefaultTransport RoundTripper = &Transport{
 // DefaultMaxIdleConnsPerHost is the default value of Transport's
 // MaxIdleConnsPerHost.
 const DefaultMaxIdleConnsPerHost = 2
-const _SC_NPROCESSORS_ONLN c.Int = 58
 
 // Debug switch provided for developers
 const (
@@ -98,7 +97,7 @@ type responseAndError struct {
 
 type timeoutData struct {
 	timeoutch chan struct{}
-	taskData  *taskData
+	clientTaskData  *clientTaskData
 }
 
 type readTrackingBody struct {
@@ -597,8 +596,6 @@ func getMilliseconds(deadline time.Time) uint64 {
 	return uint64(milliseconds)
 }
 
-var cpuCount int
-
 func init() {
 	cpuCount = int(c.Sysconf(_SC_NPROCESSORS_ONLN))
 	if cpuCount <= 0 {
@@ -666,7 +663,7 @@ func (t *Transport) RoundTrip(req *Request) (*Response, error) {
 		libuv.InitTimer(eventLoop.loop, req.timer)
 		ch := &timeoutData{
 			timeoutch: req.timeoutch,
-			taskData:  nil,
+			clientTaskData:  nil,
 		}
 		(*libuv.Handle)(c.Pointer(req.timer)).SetData(c.Pointer(ch))
 
@@ -1172,7 +1169,7 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 	writeErrCh := make(chan error, 1)
 	resc := make(chan responseAndError, 1)
 
-	taskData := &taskData{
+	clientTaskData := &clientTaskData{
 		req:        req,
 		pc:         pc,
 		addedGzip:  requestedGzip,
@@ -1190,14 +1187,14 @@ func (pc *persistConn) roundTrip(req *transportRequest) (resp *Response, err err
 	opts.Exec(pc.eventLoop.exec)
 	// send the handshake
 	handshakeTask := hyper.Handshake(hyperIo, opts)
-	taskData.taskId = handshake
-	handshakeTask.SetUserdata(c.Pointer(taskData), nil)
+	clientTaskData.taskId = handshake
+	handshakeTask.SetUserdata(c.Pointer(clientTaskData), nil)
 	// Send the request to readWriteLoop().
 	pc.eventLoop.exec.Push(handshakeTask)
 	//} else {
 	//	println("############### roundTrip: pc.client != nil")
-	//	taskData.taskId = read
-	//	err = req.write(pc.client, taskData, pc.eventLoop.exec)
+	//	clientTaskData.taskId = read
+	//	err = req.write(pc.client, clientTaskData, pc.eventLoop.exec)
 	//	if err != nil {
 	//		writeErrCh <- err
 	//		pc.close(err)
@@ -1279,16 +1276,16 @@ func readWriteLoop(checker *libuv.Idle) {
 }
 
 func (eventLoop *clientEventLoop) handleTask(task *hyper.Task) {
-	taskData := (*taskData)(task.Userdata())
-	if taskData == nil {
+	clientTaskData := (*clientTaskData)(task.Userdata())
+	if clientTaskData == nil {
 		// A background task for hyper_client completed...
 		task.Free()
 		return
 	}
 	var err error
-	pc := taskData.pc
+	pc := clientTaskData.pc
 	// If original taskId is set, we need to check it
-	err = checkTaskType(task, taskData)
+	err = checkTaskType(task, clientTaskData)
 	if err != nil {
 		if debugSwitch {
 			println("############### handleTask: checkTaskType err != nil")
@@ -1296,7 +1293,7 @@ func (eventLoop *clientEventLoop) handleTask(task *hyper.Task) {
 		closeAndRemoveIdleConn(pc, true)
 		return
 	}
-	switch taskData.taskId {
+	switch clientTaskData.taskId {
 	case handshake:
 		if debugReadWriteLoop {
 			println("############### write")
@@ -1314,12 +1311,12 @@ func (eventLoop *clientEventLoop) handleTask(task *hyper.Task) {
 		task.Free()
 
 		// TODO(hah) Proxy(writeLoop)
-		taskData.taskId = read
-		err = taskData.req.Request.write(pc.client, taskData, eventLoop.exec)
+		clientTaskData.taskId = read
+		err = clientTaskData.req.Request.write(pc.client, clientTaskData, eventLoop.exec)
 
 		if err != nil {
 			//pc.writeErrCh <- err // to the body reader, which might recycle us
-			taskData.writeErrCh <- err // to the roundTrip function
+			clientTaskData.writeErrCh <- err // to the roundTrip function
 			if debugSwitch {
 				println("############### handleTask: write err != nil")
 			}
@@ -1367,11 +1364,11 @@ func (eventLoop *clientEventLoop) handleTask(task *hyper.Task) {
 
 		var resp *Response
 		if err == nil {
-			pc.chunkAsync.SetData(c.Pointer(taskData))
-			bc := newBodyChunk(pc.chunkAsync)
-			pc.bodyChunk = bc
-			resp, err = ReadResponse(bc, taskData.req.Request, hyperResp)
-			taskData.hyperBody = hyperResp.Body()
+			pc.chunkAsync.SetData(c.Pointer(clientTaskData))
+			bc := newBodyStream(pc.chunkAsync)
+			pc.bodyStream = bc
+			resp, err = ReadResponse(bc, clientTaskData.req.Request, hyperResp)
+			clientTaskData.hyperBody = hyperResp.Body()
 		} else {
 			err = transportReadFromServerError{err}
 			pc.closeErr = err
@@ -1381,11 +1378,11 @@ func (eventLoop *clientEventLoop) handleTask(task *hyper.Task) {
 		hyperResp.Free()
 
 		if err != nil {
-			pc.bodyChunk.closeWithError(err)
-			taskData.closeHyperBody()
+			pc.bodyStream.closeWithError(err)
+			clientTaskData.closeHyperBody()
 			select {
-			case taskData.resc <- responseAndError{err: err}:
-			case <-taskData.callerGone:
+			case clientTaskData.resc <- responseAndError{err: err}:
+			case <-clientTaskData.callerGone:
 				if debugSwitch {
 					println("############### handleTask read: callerGone")
 				}
@@ -1399,32 +1396,32 @@ func (eventLoop *clientEventLoop) handleTask(task *hyper.Task) {
 			return
 		}
 
-		taskData.taskId = readBodyChunk
+		clientTaskData.taskId = readBodyChunk
 
-		if !taskData.req.deadline.IsZero() {
-			(*timeoutData)((*libuv.Handle)(c.Pointer(taskData.req.timer)).GetData()).taskData = taskData
+		if !clientTaskData.req.deadline.IsZero() {
+			(*timeoutData)((*libuv.Handle)(c.Pointer(clientTaskData.req.timer)).GetData()).clientTaskData = clientTaskData
 		}
 
 		//pc.mu.Lock()
 		pc.numExpectedResponses--
 		//pc.mu.Unlock()
 
-		needContinue := resp.checkRespBody(taskData)
+		needContinue := resp.checkRespBody(clientTaskData)
 		if needContinue {
 			return
 		}
 
-		resp.wrapRespBody(taskData)
+		resp.wrapRespBody(clientTaskData)
 
 		select {
-		case taskData.resc <- responseAndError{res: resp}:
-		case <-taskData.callerGone:
+		case clientTaskData.resc <- responseAndError{res: resp}:
+		case <-clientTaskData.callerGone:
 			// defer
 			if debugSwitch {
 				println("############### handleTask read: callerGone 2")
 			}
-			pc.bodyChunk.Close()
-			taskData.closeHyperBody()
+			pc.bodyStream.Close()
+			clientTaskData.closeHyperBody()
 			closeAndRemoveIdleConn(pc, true)
 			return
 		}
@@ -1446,7 +1443,7 @@ func (eventLoop *clientEventLoop) handleTask(task *hyper.Task) {
 			chunk.Free()
 			task.Free()
 			// Write to the channel
-			pc.bodyChunk.readCh <- bytes
+			pc.bodyStream.readCh <- bytes
 			if debugReadWriteLoop {
 				println("############### readBodyChunk end [buf]")
 			}
@@ -1455,9 +1452,9 @@ func (eventLoop *clientEventLoop) handleTask(task *hyper.Task) {
 
 		// taskType == taskEmpty (check in checkTaskType)
 		task.Free()
-		pc.bodyChunk.closeWithError(io.EOF)
-		taskData.closeHyperBody()
-		replaced := pc.t.replaceReqCanceler(taskData.req.cancelKey, nil) // before pc might return to idle pool
+		pc.bodyStream.closeWithError(io.EOF)
+		clientTaskData.closeHyperBody()
+		replaced := pc.t.replaceReqCanceler(clientTaskData.req.cancelKey, nil) // before pc might return to idle pool
 		pc.alive = pc.alive &&
 			replaced && pc.tryPutIdleConn()
 
@@ -1473,10 +1470,10 @@ func (eventLoop *clientEventLoop) handleTask(task *hyper.Task) {
 }
 
 func readyToRead(aysnc *libuv.Async) {
-	taskData := (*taskData)(aysnc.GetData())
-	dataTask := taskData.hyperBody.Data()
-	dataTask.SetUserdata(c.Pointer(taskData), nil)
-	taskData.pc.eventLoop.exec.Push(dataTask)
+	clientTaskData := (*clientTaskData)(aysnc.GetData())
+	dataTask := clientTaskData.hyperBody.Data()
+	dataTask.SetUserdata(c.Pointer(clientTaskData), nil)
+	clientTaskData.pc.eventLoop.exec.Push(dataTask)
 }
 
 // closeAndRemoveIdleConn Replace the defer function of readLoop in stdlib
@@ -1504,7 +1501,7 @@ type connData struct {
 	isClosing     atomic.Bool
 }
 
-type taskData struct {
+type clientTaskData struct {
 	taskId     taskId
 	req        *transportRequest
 	pc         *persistConn
@@ -1545,7 +1542,7 @@ func (conn *connData) Close() {
 	}
 }
 
-func (d *taskData) closeHyperBody() {
+func (d *clientTaskData) closeHyperBody() {
 	if d.hyperBody != nil {
 		d.hyperBody.Free()
 		d.hyperBody = nil
@@ -1666,11 +1663,11 @@ func onTimeout(timer *libuv.Timer) {
 	close(data.timeoutch)
 	timer.Stop()
 
-	taskData := data.taskData
-	if taskData != nil {
-		pc := taskData.pc
+	clientTaskData := data.clientTaskData
+	if clientTaskData != nil {
+		pc := clientTaskData.pc
 		pc.alive = false
-		pc.t.cancelRequest(taskData.req.cancelKey, errors.New("timeout: req.Context().Err()"))
+		pc.t.cancelRequest(clientTaskData.req.cancelKey, errors.New("timeout: req.Context().Err()"))
 		closeAndRemoveIdleConn(pc, true)
 	}
 }
@@ -1685,8 +1682,8 @@ func newHyperIo(connData *connData) *hyper.Io {
 }
 
 // checkTaskType checks the task type
-func checkTaskType(task *hyper.Task, taskData *taskData) (err error) {
-	curTaskId := taskData.taskId
+func checkTaskType(task *hyper.Task, clientTaskData *clientTaskData) (err error) {
+	curTaskId := clientTaskData.taskId
 	taskType := task.Type()
 	if taskType == hyper.TaskError {
 		err = fail((*hyper.Error)(task.Value()), curTaskId)
@@ -1710,18 +1707,18 @@ func checkTaskType(task *hyper.Task, taskData *taskData) (err error) {
 	if err != nil {
 		task.Free()
 		if curTaskId == handshake || curTaskId == read {
-			taskData.writeErrCh <- err
+			clientTaskData.writeErrCh <- err
 			if debugSwitch {
 				println("############### checkTaskType: writeErrCh")
 			}
-			taskData.pc.close(err)
+			clientTaskData.pc.close(err)
 		}
-		if taskData.pc.bodyChunk != nil {
-			taskData.pc.bodyChunk.Close()
-			taskData.pc.bodyChunk = nil
+		if clientTaskData.pc.bodyStream != nil {
+			clientTaskData.pc.bodyStream.Close()
+			clientTaskData.pc.bodyStream = nil
 		}
-		taskData.closeHyperBody()
-		taskData.pc.alive = false
+		clientTaskData.closeHyperBody()
+		clientTaskData.pc.alive = false
 	}
 	return
 }
@@ -1919,7 +1916,7 @@ type persistConn struct {
 	closeErr       error             // Replace the closeErr in readLoop
 	tryPutIdleConn func() bool       // Replace the tryPutIdleConn in readLoop
 	client         *hyper.ClientConn // http long connection client handle
-	bodyChunk      *bodyChunk        // Implement non-blocking consumption of each responseBody chunk
+	bodyStream     *bodyStream        // Implement non-blocking consumption of each responseBody chunk
 	chunkAsync     *libuv.Async      // Notifying that the received chunk has been read
 }
 

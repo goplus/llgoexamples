@@ -5,9 +5,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"golang.org/x/net/idna"
-
 	"github.com/goplus/llgoexamples/x/net"
+	"golang.org/x/net/idna"
 )
 
 /**
